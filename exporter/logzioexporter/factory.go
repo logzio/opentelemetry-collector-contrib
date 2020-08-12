@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/configmodels"
+	"time"
 )
 
 const typeStr = "logzio"
@@ -31,7 +32,9 @@ func NewFactory() component.ExporterFactory {
 }
 
 func createDefaultConfig() configmodels.Exporter {
-	return nil
+	return &Config{
+		Region: "",
+	}
 }
 
 func createTraceExporter(

@@ -37,10 +37,7 @@ func createDefaultConfig() configmodels.Exporter {
 	}
 }
 
-func createTraceExporter(
-	_ context.Context,
-	params component.ExporterCreateParams,
-	config configmodels.Exporter,
-) (component.TraceExporter, error) {
-	return nil
+func createTraceExporter(_ context.Context, params component.ExporterCreateParams, cfg configmodels.Exporter, ) (component.TraceExporter, error) {
+	config := cfg.(*Config)
+	return newLogzioTraceExporter(config, params)
 }

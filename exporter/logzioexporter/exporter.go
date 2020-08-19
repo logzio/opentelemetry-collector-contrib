@@ -3,20 +3,19 @@ package logzioexporter
 import (
 	"context"
 	"fmt"
-	"github.com/logzio/logzio-go"
+	"github.com/hashicorp/go-hclog"
+	"github.com/logzio/jaeger-logzio/store"
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config/configmodels"
+	"go.opentelemetry.io/collector/consumer/pdata"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
-	"go.opentelemetry.io/collector/consumer/consumerdata"
-	"go.uber.org/zap"
+	"go.opentelemetry.io/collector/translator/trace/jaeger"
 	"go.uber.org/zap/zapcore"
 	"io"
 )
 
 const (
-	dropLogsDiskThreshold = 98
 	usRegionCode 		  = "us"
-	logzioListenerUrl	  = "https://liste	ner%s.logz.io:8071"
+	loggerName 			  = "logzio-exporter"
 )
 
 var _ io.Writer = logWriter{}
@@ -35,23 +34,31 @@ func (w logWriter) Write(p []byte) (n int, err error) {
 // exporter exporters OpenTelemetry Collector data to New Relic.
 type logzioExporter struct {
 	accountToken string
-	sender       *logzio.LogzioSender
+	writer       *store.LogzioSpanWriter
+	logger		 hclog.Logger
 }
 
 func newLogzioExporter(config *Config, params component.ExporterCreateParams) (*logzioExporter, error) {
-	sender, err := logzio.New(
-		config.Token,
-		logzio.SetUrl(fmt.Sprintf(logzioListenerUrl, regionCode(config.Region))),
-		logzio.SetDrainDiskThreshold(dropLogsDiskThreshold),
-		//logzio.SetDebug(logWriter{logf: logger.Debug}),
-	)
+	logger := hclog.New(&hclog.LoggerOptions{
+		Level:      hclog.Debug,
+		Name:       loggerName,
+		JSONFormat: true,
+	})
+
+	writerConfig := store.LogzioConfig{
+		Region:			config.Region,
+		AccountToken:	config.Token,
+	}
+
+	spanWriter, err := store.NewLogzioSpanWriter(writerConfig, logger)
 	if err != nil {
 		return nil, err
 	}
 
 	return &logzioExporter{
-		sender:			sender,
+		writer:			spanWriter,
 		accountToken:	config.Token,
+		logger:			logger,
 	}, nil
 }
 
@@ -67,35 +74,25 @@ func newLogzioTraceExporter(config *Config, params component.ExporterCreateParam
 		exporterhelper.WithShutdown(exporter.Shutdown))
 }
 
-func (se *sapmExporter) pushTraceData(ctx context.Context, td pdata.Traces) (droppedSpansCount int, err error) {
-	var errs []error
-	goodSpans := 0
-
-	for _, span := range td.Spans {
-		if span.IsNil() {
-			// Invalid trace so nothing to export
-			continue
-		}
-		nrSpan, err := transform.Span(span)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		err = exporter.harvester.RecordSpan(nrSpan)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		goodSpans++
+func (exporter *logzioExporter) pushTraceData(ctx context.Context, traces pdata.Traces) (droppedSpansCount int, err error) {
+	droppedSpans := 0
+	batches, err := jaeger.InternalTracesToJaegerProto(traces)
+	if err != nil {
+		return traces.SpanCount(), err
 	}
-
-	exporter.harvester.HarvestNow(ctx)
-
-	return len(td.Spans) - goodSpans, componenterror.CombineErrors(errs)
+	for _, batch := range batches {
+		for _, span := range batch.Spans {
+			if err := exporter.writer.WriteSpan(span); err != nil {
+				exporter.logger.Debug(fmt.Sprintf("dropped bad span: %s", span.String()))
+				droppedSpans++
+			}
+		}
+	}
+	return droppedSpans, nil
 }
 
 func (exporter *logzioExporter) Shutdown(ctx context.Context) error {
-	exporter.sender.Stop()
+	exporter.writer.Close()
 	return nil
 }
 

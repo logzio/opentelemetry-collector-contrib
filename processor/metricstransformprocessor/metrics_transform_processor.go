@@ -16,22 +16,38 @@ package metricstransformprocessor
 
 import (
 	"context"
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 
+	commonpb "github.com/census-instrumentation/opencensus-proto/gen-go/agent/common/v1"
 	metricspb "github.com/census-instrumentation/opencensus-proto/gen-go/metrics/v1"
-	"github.com/golang/protobuf/ptypes/timestamp"
-	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/consumer"
+	resourcepb "github.com/census-instrumentation/opencensus-proto/gen-go/resource/v1"
+	"go.opentelemetry.io/collector/consumer/consumerdata"
 	"go.opentelemetry.io/collector/consumer/pdata"
-	"go.opentelemetry.io/collector/consumer/pdatautil"
+	"go.opentelemetry.io/collector/processor/processorhelper"
+	"go.opentelemetry.io/collector/translator/internaldata"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+type metricsTransformProcessor struct {
+	transforms []internalTransform
+	logger     *zap.Logger
+}
+
+var _ processorhelper.MProcessor = (*metricsTransformProcessor)(nil)
+
 type internalTransform struct {
-	MetricName string
-	Action     ConfigAction
-	NewName    string
-	Operations []internalOperation
+	MetricIncludeFilter internalFilter
+	Action              ConfigAction
+	NewName             string
+	GroupResourceLabels map[string]string
+	AggregationType     AggregationType
+	SubmatchCase        SubmatchCase
+	Operations          []internalOperation
 }
 
 type internalOperation struct {
@@ -41,96 +57,313 @@ type internalOperation struct {
 	aggregatedValuesSet map[string]bool
 }
 
-type metricsTransformProcessor struct {
-	next       consumer.MetricsConsumer
-	transforms []internalTransform
-	logger     *zap.Logger
+type internalFilter interface {
+	getMatches(toMatch metricNameMapping) []*match
+	getSubexpNames() []string
 }
 
-var _ component.MetricsProcessor = (*metricsTransformProcessor)(nil)
+type match struct {
+	metric     *metricspb.Metric
+	pattern    *regexp.Regexp
+	submatches []int
+}
 
-func newMetricsTransformProcessor(next consumer.MetricsConsumer, logger *zap.Logger, internalTransforms []internalTransform) *metricsTransformProcessor {
+type internalFilterStrict struct {
+	include string
+}
+
+func (f internalFilterStrict) getMatches(toMatch metricNameMapping) []*match {
+	if metrics, ok := toMatch[f.include]; ok {
+		matches := make([]*match, len(metrics))
+		for i, metric := range metrics {
+			matches[i] = &match{metric: metric}
+		}
+		return matches
+	}
+
+	return nil
+}
+
+func (f internalFilterStrict) getSubexpNames() []string {
+	return nil
+}
+
+type internalFilterRegexp struct {
+	include *regexp.Regexp
+}
+
+func (f internalFilterRegexp) getMatches(toMatch metricNameMapping) []*match {
+	matches := make([]*match, 0, 10)
+	for name, metrics := range toMatch {
+		if submatches := f.include.FindStringSubmatchIndex(name); submatches != nil {
+			for _, metric := range metrics {
+				matches = append(matches, &match{metric: metric, pattern: f.include, submatches: submatches})
+			}
+		}
+	}
+	return matches
+}
+
+func (f internalFilterRegexp) getSubexpNames() []string {
+	return f.include.SubexpNames()
+}
+
+type metricNameMapping map[string][]*metricspb.Metric
+
+func newMetricNameMapping(data *consumerdata.MetricsData) metricNameMapping {
+	mnm := metricNameMapping(make(map[string][]*metricspb.Metric, len(data.Metrics)))
+	for _, m := range data.Metrics {
+		mnm.add(m.MetricDescriptor.Name, m)
+	}
+	return mnm
+}
+
+func (mnm metricNameMapping) add(name string, metrics ...*metricspb.Metric) {
+	mnm[name] = append(mnm[name], metrics...)
+}
+
+func (mnm metricNameMapping) remove(name string, metrics ...*metricspb.Metric) {
+	for _, metric := range metrics {
+		for j, m := range mnm[name] {
+			if metric == m {
+				mnm[name] = append(mnm[name][:j], mnm[name][j+1:]...)
+				break
+			}
+		}
+	}
+}
+
+func newMetricsTransformProcessor(logger *zap.Logger, internalTransforms []internalTransform) *metricsTransformProcessor {
 	return &metricsTransformProcessor{
-		next:       next,
 		transforms: internalTransforms,
 		logger:     logger,
 	}
 }
 
-// GetCapabilities returns the Capabilities associated with the metrics transform processor.
-func (mtp *metricsTransformProcessor) GetCapabilities() component.ProcessorCapabilities {
-	return component.ProcessorCapabilities{MutatesConsumedData: true}
-}
-
-// Start is invoked during service startup.
-func (*metricsTransformProcessor) Start(ctx context.Context, host component.Host) error {
-	return nil
-}
-
-// Shutdown is invoked during service shutdown.
-func (*metricsTransformProcessor) Shutdown(ctx context.Context) error {
-	return nil
-}
-
-// ConsumeMetrics implements the MetricsProcessor interface.
-func (mtp *metricsTransformProcessor) ConsumeMetrics(ctx context.Context, md pdata.Metrics) error {
-	return mtp.next.ConsumeMetrics(ctx, mtp.transform(md))
-}
-
-// transform transforms the metrics based on the information specified in the config.
-func (mtp *metricsTransformProcessor) transform(md pdata.Metrics) pdata.Metrics {
-	mds := pdatautil.MetricsToMetricsData(md)
+// ProcessMetrics implements the MProcessor interface.
+func (mtp *metricsTransformProcessor) ProcessMetrics(_ context.Context, md pdata.Metrics) (pdata.Metrics, error) {
+	mds := internaldata.MetricsToOC(md)
+	groupedMds := make([]consumerdata.MetricsData, 0)
 
 	for i := range mds {
 		data := &mds[i]
-		nameToMetricMapping := make(map[string]*metricspb.Metric, len(data.Metrics))
-		for _, metric := range data.Metrics {
-			nameToMetricMapping[metric.MetricDescriptor.Name] = metric
-		}
 
+		nameToMetricMapping := newMetricNameMapping(data)
 		for _, transform := range mtp.transforms {
-			metric, ok := nameToMetricMapping[transform.MetricName]
-			if !ok {
-				continue
+			matchedMetrics := transform.MetricIncludeFilter.getMatches(nameToMetricMapping)
+
+			if transform.Action == Group && len(matchedMetrics) > 0 {
+				nData := mtp.groupMatchedMetrics(data, matchedMetrics, transform)
+				groupedMds = append(groupedMds, *nData)
+				data.Metrics = mtp.removeMatchedMetrics(data.Metrics, matchedMetrics)
 			}
 
-			if transform.Action == Insert {
-				metric = proto.Clone(metric).(*metricspb.Metric)
-				data.Metrics = append(data.Metrics, metric)
-			}
-
-			mtp.update(metric, transform)
-
-			if transform.NewName != "" {
-				if transform.Action == Update {
-					delete(nameToMetricMapping, transform.MetricName)
+			if transform.Action == Combine && len(matchedMetrics) > 0 {
+				if err := mtp.canBeCombined(matchedMetrics); err != nil {
+					// TODO: report via trace / metric instead
+					mtp.logger.Warn(err.Error())
+					continue
 				}
-				nameToMetricMapping[transform.NewName] = metric
+
+				combined := mtp.combine(matchedMetrics, transform)
+				data.Metrics = mtp.removeMatchedMetricsAndAppendCombined(data.Metrics, matchedMetrics, combined)
+
+				// set matchedMetrics to the combined metric so that any additional operations are performed on
+				// the combined metric
+				matchedMetrics = []*match{{metric: combined}}
+			}
+
+			for _, match := range matchedMetrics {
+				metricName := match.metric.MetricDescriptor.Name
+
+				if transform.Action == Insert {
+					match.metric = proto.Clone(match.metric).(*metricspb.Metric)
+					data.Metrics = append(data.Metrics, match.metric)
+				}
+
+				mtp.update(match, transform)
+
+				if transform.NewName != "" {
+					if transform.Action == Update {
+						nameToMetricMapping.remove(metricName, match.metric)
+					}
+					nameToMetricMapping.add(match.metric.MetricDescriptor.Name, match.metric)
+				}
 			}
 		}
 	}
 
-	return pdatautil.MetricsFromMetricsData(mds)
+	resultmds := append(mds, groupedMds...)
+	return internaldata.OCSliceToMetrics(resultmds), nil
+}
+
+// groupMatchedMetrics groups matched metrics into a new MetricsData with a new Resource and returns it.
+func (mtp *metricsTransformProcessor) groupMatchedMetrics(oData *consumerdata.MetricsData, matchedMetrics []*match,
+	transform internalTransform) (nData *consumerdata.MetricsData) {
+	// create new ResouceMetrics bucket
+	nData = &consumerdata.MetricsData{
+		Node:     proto.Clone(oData.Node).(*commonpb.Node),
+		Resource: proto.Clone(oData.Resource).(*resourcepb.Resource),
+		Metrics:  make([]*metricspb.Metric, 0),
+	}
+
+	// update new resource labels to the new ResouceMetrics bucket
+	if nData.Resource == nil || nData.Resource.GetLabels() == nil {
+		nData.Resource = &resourcepb.Resource{
+			Labels: make(map[string]string),
+		}
+	}
+
+	rlabels := nData.Resource.GetLabels()
+	for k, v := range transform.GroupResourceLabels {
+		rlabels[k] = v
+	}
+
+	// reassign matched metrics to the new ResouceMetrics bucket
+	for _, match := range matchedMetrics {
+		nData.Metrics = append(nData.Metrics, match.metric)
+	}
+	return nData
+}
+
+// canBeCombined returns true if all the provided metrics share the same type, unit, and labels
+func (mtp *metricsTransformProcessor) canBeCombined(matchedMetrics []*match) error {
+	if len(matchedMetrics) <= 1 {
+		return nil
+	}
+
+	firstMetricDescriptor := matchedMetrics[0].metric.MetricDescriptor
+	firstMetricLabelKeys := make(map[string]struct{}, len(firstMetricDescriptor.LabelKeys))
+	for _, label := range firstMetricDescriptor.LabelKeys {
+		firstMetricLabelKeys[label.Key] = struct{}{}
+	}
+
+	for i := 1; i < len(matchedMetrics); i++ {
+		metric := matchedMetrics[i].metric
+		if metric.MetricDescriptor.Type != firstMetricDescriptor.Type {
+			return fmt.Errorf("metrics cannot be combined as they are of different types: %v (%v) and %v (%v)", firstMetricDescriptor.Name, firstMetricDescriptor.Type, metric.MetricDescriptor.Name, metric.MetricDescriptor.Type)
+		}
+		if metric.MetricDescriptor.Unit != firstMetricDescriptor.Unit {
+			return fmt.Errorf("metrics cannot be combined as they have different units: %v (%v) and %v (%v)", firstMetricDescriptor.Name, firstMetricDescriptor.Unit, metric.MetricDescriptor.Name, metric.MetricDescriptor.Unit)
+		}
+
+		if len(metric.MetricDescriptor.LabelKeys) != len(firstMetricLabelKeys) {
+			return fmt.Errorf("metrics cannot be combined as they have different labels: %v (%v) and %v (%v)", firstMetricDescriptor.Name, firstMetricDescriptor.LabelKeys, metric.MetricDescriptor.Name, metric.MetricDescriptor.LabelKeys)
+		}
+
+		for _, label := range metric.MetricDescriptor.LabelKeys {
+			if _, ok := firstMetricLabelKeys[label.Key]; !ok {
+				return fmt.Errorf("metrics cannot be combined as they have different labels: %v (%v) and %v (%v)", firstMetricDescriptor.Name, firstMetricDescriptor.LabelKeys, metric.MetricDescriptor.Name, metric.MetricDescriptor.LabelKeys)
+			}
+		}
+	}
+
+	return nil
+}
+
+// combine combines the metrics based on the supplied filter.
+func (mtp *metricsTransformProcessor) combine(matchedMetrics []*match, transform internalTransform) *metricspb.Metric {
+	// create combined metric with relevant name & descriptor
+	combinedMetric := &metricspb.Metric{}
+	combinedMetric.MetricDescriptor = proto.Clone(matchedMetrics[0].metric.MetricDescriptor).(*metricspb.MetricDescriptor)
+	combinedMetric.MetricDescriptor.Name = transform.NewName
+	combinedMetric.MetricDescriptor.Description = ""
+
+	// append label keys based on the transform filter's named capturing groups
+	subexprNames := transform.MetricIncludeFilter.getSubexpNames()
+	for i := 1; i < len(subexprNames); i++ {
+		// if the subexpression is not named, use regexp notation, e.g. $1
+		name := subexprNames[i]
+		if name == "" {
+			name = "$" + strconv.Itoa(i)
+		}
+
+		combinedMetric.MetricDescriptor.LabelKeys = append(combinedMetric.MetricDescriptor.LabelKeys, &metricspb.LabelKey{Key: name})
+	}
+
+	// combine timeseries from all metrics, using the specified AggregationType if data points need to be merged
+	var allTimeseries []*metricspb.TimeSeries
+	for _, match := range matchedMetrics {
+		for _, ts := range match.metric.Timeseries {
+			// append label values based on regex submatches
+			for i := 1; i < len(match.submatches)/2; i++ {
+				submatch := match.metric.MetricDescriptor.Name[match.submatches[2*i]:match.submatches[2*i+1]]
+				submatch = replaceCaseOfSubmatch(transform.SubmatchCase, submatch)
+				ts.LabelValues = append(ts.LabelValues, &metricspb.LabelValue{Value: submatch, HasValue: (submatch != "")})
+			}
+
+			allTimeseries = append(allTimeseries, match.metric.Timeseries...)
+		}
+	}
+
+	groupedTimeseries := mtp.groupTimeseries(allTimeseries, len(combinedMetric.MetricDescriptor.LabelKeys))
+	aggregatedTimeseries := mtp.mergeTimeseries(groupedTimeseries, transform.AggregationType, combinedMetric.MetricDescriptor.Type)
+
+	mtp.sortTimeseries(aggregatedTimeseries)
+	combinedMetric.Timeseries = aggregatedTimeseries
+
+	return combinedMetric
+}
+
+func replaceCaseOfSubmatch(replacement SubmatchCase, submatch string) string {
+	switch replacement {
+	case Lower:
+		return strings.ToLower(submatch)
+	case Upper:
+		return strings.ToUpper(submatch)
+	}
+
+	return submatch
+}
+
+// removeMatchedMetrics removes the set of matched metrics from metrics
+func (mtp *metricsTransformProcessor) removeMatchedMetrics(metrics []*metricspb.Metric, matchedMetrics []*match) []*metricspb.Metric {
+	filteredMetrics := make([]*metricspb.Metric, 0, len(metrics)-len(matchedMetrics))
+	for _, metric := range metrics {
+		var matched bool
+		for _, match := range matchedMetrics {
+			if match.metric == metric {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			filteredMetrics = append(filteredMetrics, metric)
+		}
+	}
+	return filteredMetrics
+}
+
+// removeMatchedMetricsAndAppendCombined removes the set of matched metrics from metrics and appends the combined metric at the end.
+func (mtp *metricsTransformProcessor) removeMatchedMetricsAndAppendCombined(metrics []*metricspb.Metric, matchedMetrics []*match, combined *metricspb.Metric) []*metricspb.Metric {
+	filteredMetrics := mtp.removeMatchedMetrics(metrics, matchedMetrics)
+	return append(filteredMetrics, combined)
 }
 
 // update updates the metric content based on operations indicated in transform.
-func (mtp *metricsTransformProcessor) update(metric *metricspb.Metric, transform internalTransform) {
+func (mtp *metricsTransformProcessor) update(match *match, transform internalTransform) {
 	if transform.NewName != "" {
-		metric.MetricDescriptor.Name = transform.NewName
+		if match.pattern == nil {
+			match.metric.MetricDescriptor.Name = transform.NewName
+		} else {
+			match.metric.MetricDescriptor.Name = string(match.pattern.ExpandString([]byte{}, transform.NewName, match.metric.MetricDescriptor.Name, match.submatches))
+		}
 	}
 
 	for _, op := range transform.Operations {
 		switch op.configOperation.Action {
 		case UpdateLabel:
-			mtp.updateLabelOp(metric, op)
+			mtp.updateLabelOp(match.metric, op)
 		case AggregateLabels:
-			mtp.aggregateLabelsOp(metric, op)
+			mtp.aggregateLabelsOp(match.metric, op)
 		case AggregateLabelValues:
-			mtp.aggregateLabelValuesOp(metric, op)
+			mtp.aggregateLabelValuesOp(match.metric, op)
 		case ToggleScalarDataType:
-			mtp.ToggleScalarDataType(metric)
+			mtp.ToggleScalarDataType(match.metric)
 		case AddLabel:
-			mtp.addLabelOp(metric, op)
+			mtp.addLabelOp(match.metric, op)
+		case DeleteLabelValue:
+			mtp.deleteLabelValueOp(match.metric, op)
 		}
 	}
 }
@@ -167,6 +400,10 @@ func (mtp *metricsTransformProcessor) minInt64(num1, num2 int64) int64 {
 }
 
 // compareTimestamps returns if t1 is a smaller timestamp than t2
-func (mtp *metricsTransformProcessor) compareTimestamps(t1 *timestamp.Timestamp, t2 *timestamp.Timestamp) bool {
+func (mtp *metricsTransformProcessor) compareTimestamps(t1 *timestamppb.Timestamp, t2 *timestamppb.Timestamp) bool {
+	if t1 == nil || t2 == nil {
+		return t1 != nil
+	}
+
 	return t1.Seconds < t2.Seconds || (t1.Seconds == t2.Seconds && t1.Nanos < t2.Nanos)
 }

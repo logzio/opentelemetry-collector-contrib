@@ -16,6 +16,7 @@ package simpleprometheusreceiver
 
 import (
 	"context"
+	"net/url"
 	"reflect"
 	"testing"
 	"time"
@@ -23,8 +24,7 @@ import (
 	configutil "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/config"
-	sdconfig "github.com/prometheus/prometheus/discovery/config"
-	"github.com/prometheus/prometheus/discovery/targetgroup"
+	"github.com/prometheus/prometheus/discovery"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenttest"
@@ -35,7 +35,7 @@ import (
 )
 
 func TestReceiver(t *testing.T) {
-	f := &Factory{}
+	f := NewFactory()
 	tests := []struct {
 		name              string
 		useServiceAccount bool
@@ -91,6 +91,7 @@ func TestGetPrometheusConfig(t *testing.T) {
 				},
 				CollectionInterval: 10 * time.Second,
 				MetricsPath:        "/metric",
+				Params:             url.Values{"foo": []string{"bar", "foobar"}},
 			},
 			want: &prometheusreceiver.Config{
 				PrometheusConfig: &config.Config{
@@ -102,8 +103,9 @@ func TestGetPrometheusConfig(t *testing.T) {
 							HonorTimestamps: true,
 							Scheme:          "http",
 							MetricsPath:     "/metric",
-							ServiceDiscoveryConfig: sdconfig.ServiceDiscoveryConfig{
-								StaticConfigs: []*targetgroup.Group{
+							Params:          url.Values{"foo": []string{"bar", "foobar"}},
+							ServiceDiscoveryConfigs: discovery.Configs{
+								&discovery.StaticConfig{
 									{
 										Targets: []model.LabelSet{
 											{model.AddressLabel: model.LabelValue("localhost:1234")},
@@ -144,8 +146,8 @@ func TestGetPrometheusConfig(t *testing.T) {
 							ScrapeTimeout:   model.Duration(10 * time.Second),
 							MetricsPath:     "/metrics",
 							Scheme:          "https",
-							ServiceDiscoveryConfig: sdconfig.ServiceDiscoveryConfig{
-								StaticConfigs: []*targetgroup.Group{
+							ServiceDiscoveryConfigs: discovery.Configs{
+								&discovery.StaticConfig{
 									{
 										Targets: []model.LabelSet{
 											{model.AddressLabel: model.LabelValue("localhost:1234")},
@@ -188,8 +190,8 @@ func TestGetPrometheusConfig(t *testing.T) {
 							ScrapeTimeout:   model.Duration(10 * time.Second),
 							MetricsPath:     "/metrics",
 							Scheme:          "https",
-							ServiceDiscoveryConfig: sdconfig.ServiceDiscoveryConfig{
-								StaticConfigs: []*targetgroup.Group{
+							ServiceDiscoveryConfigs: discovery.Configs{
+								&discovery.StaticConfig{
 									{
 										Targets: []model.LabelSet{
 											{model.AddressLabel: model.LabelValue("localhost:1234")},

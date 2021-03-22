@@ -11,6 +11,15 @@ exporters:
     access_token: testToken
     realm: "us1"
     timeout: 2s
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 10
+    retry_on_failure:
+      enabled: true
+      initial_interval: 10s
+      max_interval: 60s
+      max_elapsed_time: 10m
     headers:
       added-entry: "added value"
       dot.test: test
@@ -18,8 +27,29 @@ exporters:
     send_compatible_metrics: true
     translation_rules:
     - action: rename_dimension_keys
-      mapping: 
+      mapping:
         k8s.cluster.name: kubernetes_cluster
+    exclude_metrics:
+      - metric_name: metric1
+      - metric_names: [metric2, metric3]
+      - metric_name: metric4
+        dimensions:
+          dimension_key: dimension_val
+      - metric_name: metric5
+        dimensions:
+          dimension_key: [dimension_val1, dimension_val2]
+      # Apart from exact matches these fields also take regex and globs
+      - metric_name: /cpu\..*/
+      - metric_names: [cpu.util*, memory.util*]
+      - metric_name: cpu.utilization
+        dimensions:
+          container_name: /^[A-Z][A-Z]$/
+    include_metrics:
+      - metric_name: metric1
+      - metric_names: [metric2, metric3]
+
+
+
 
 service:
   pipelines:
@@ -27,3 +57,7 @@ service:
       receivers: [examplereceiver]
       processors: [exampleprocessor]
       exporters: [signalfx, signalfx/allsettings]
+    traces:
+      receivers: [examplereceiver]
+      processors: [exampleprocessor]
+      exporters: [signalfx]

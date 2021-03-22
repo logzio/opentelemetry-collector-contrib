@@ -22,6 +22,8 @@ import (
 	"go.opentelemetry.io/collector/translator/conventions"
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/common/metrics"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/common/testing/util"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/utils"
 )
 
@@ -37,7 +39,7 @@ const (
 )
 
 var containerRestartMetric = &metricspb.MetricDescriptor{
-	Name: "k8s/container/restarts",
+	Name: "k8s.container.restarts",
 	Description: "How many times the container has restarted in the recent past. " +
 		"This value is pulled directly from the K8s API and the value can go indefinitely high" +
 		" and be reset to 0 at any time depending on how your kubelet is configured to prune" +
@@ -50,7 +52,7 @@ var containerRestartMetric = &metricspb.MetricDescriptor{
 }
 
 var containerReadyMetric = &metricspb.MetricDescriptor{
-	Name:        "k8s/container/ready",
+	Name:        "k8s.container.ready",
 	Description: "Whether a container has passed its readiness probe (0 for no, 1 for yes)",
 	Type:        metricspb.MetricDescriptor_GAUGE_INT64,
 }
@@ -114,7 +116,7 @@ func getSpecMetricsForContainer(c corev1.Container) []*metricspb.Metric {
 			metrics = append(metrics,
 				&metricspb.Metric{
 					MetricDescriptor: &metricspb.MetricDescriptor{
-						Name:        fmt.Sprintf("k8s/container/%s/%s", k, t.typ),
+						Name:        fmt.Sprintf("k8s.container.%s_%s", k, t.typ),
 						Description: t.description,
 						Type:        metricspb.MetricDescriptor_GAUGE_INT64,
 					},
@@ -142,7 +144,7 @@ func getResourceForContainer(labels map[string]string) *resourcepb.Resource {
 func getAllContainerLabels(cs corev1.ContainerStatus,
 	dims map[string]string) map[string]string {
 
-	out := utils.CloneStringMap(dims)
+	out := util.CloneStringMap(dims)
 
 	out[conventions.AttributeContainerID] = utils.StripContainerID(cs.ContainerID)
 	out[conventions.AttributeK8sContainer] = cs.Name
@@ -170,7 +172,7 @@ func getMetadataForContainer(cs corev1.ContainerStatus) *KubernetesMetadata {
 
 	return &KubernetesMetadata{
 		resourceIDKey: conventions.AttributeContainerID,
-		resourceID:    ResourceID(utils.StripContainerID(cs.ContainerID)),
+		resourceID:    metrics.ResourceID(utils.StripContainerID(cs.ContainerID)),
 		metadata:      metadata,
 	}
 }

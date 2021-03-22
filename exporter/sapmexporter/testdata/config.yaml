@@ -18,11 +18,22 @@ exporters:
     # NumWorkers is the number of workers that should be used to export traces.
     # Exporter can make as many requests in parallel as the number of workers.
     num_workers: 3
-    
+
     # MaxConnections is used to set a limit to the maximum idle HTTP connection the exporter can keep open.
     max_connections: 45
 
     access_token_passthrough: false
+
+    timeout: 10s
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      queue_size: 10
+    retry_on_failure:
+      enabled: true
+      initial_interval: 10s
+      max_interval: 60s
+      max_elapsed_time: 10m
 
 service:
   pipelines:

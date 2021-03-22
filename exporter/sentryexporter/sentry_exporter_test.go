@@ -20,7 +20,6 @@ import (
 
 	"github.com/getsentry/sentry-go"
 	"github.com/google/go-cmp/cmp"
-	otlptrace "github.com/open-telemetry/opentelemetry-proto/gen/go/trace/v1"
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/collector/consumer/pdata"
 	"go.opentelemetry.io/collector/translator/conventions"
@@ -154,31 +153,9 @@ func generateOrphanSpansFromSpans(spans ...*sentry.Span) []*sentry.Span {
 }
 
 func TestSpanToSentrySpan(t *testing.T) {
-	t.Run("with nil span", func(t *testing.T) {
+	t.Run("with root span and invalid parent span_id", func(t *testing.T) {
 		testSpan := pdata.NewSpan()
-
-		sentrySpan := convertToSentrySpan(testSpan, pdata.NewInstrumentationLibrary(), map[string]string{})
-		assert.Nil(t, sentrySpan)
-	})
-
-	t.Run("with root span and nil parent span_id", func(t *testing.T) {
-		testSpan := pdata.NewSpan()
-		testSpan.InitEmpty()
-
-		var parentSpanID []byte
-		testSpan.SetParentSpanID(parentSpanID)
-
-		sentrySpan := convertToSentrySpan(testSpan, pdata.NewInstrumentationLibrary(), map[string]string{})
-		assert.NotNil(t, sentrySpan)
-		assert.True(t, isRootSpan(sentrySpan))
-	})
-
-	t.Run("with root span and 0 byte slice", func(t *testing.T) {
-		testSpan := pdata.NewSpan()
-		testSpan.InitEmpty()
-
-		parentSpanID := []byte{0, 0, 0, 0, 0, 0, 0, 0}
-		testSpan.SetParentSpanID(parentSpanID)
+		testSpan.SetParentSpanID(pdata.InvalidSpanID())
 
 		sentrySpan := convertToSentrySpan(testSpan, pdata.NewInstrumentationLibrary(), map[string]string{})
 		assert.NotNil(t, sentrySpan)
@@ -187,11 +164,10 @@ func TestSpanToSentrySpan(t *testing.T) {
 
 	t.Run("with full span", func(t *testing.T) {
 		testSpan := pdata.NewSpan()
-		testSpan.InitEmpty()
 
-		traceID := []byte{1, 2, 3, 4, 5, 6, 7, 8, 8, 7, 6, 5, 4, 3, 2, 1}
-		spanID := []byte{1, 2, 3, 4, 5, 6, 7, 8}
-		parentSpanID := []byte{8, 7, 6, 5, 4, 3, 2, 1}
+		traceID := pdata.NewTraceID([16]byte{1, 2, 3, 4, 5, 6, 7, 8, 8, 7, 6, 5, 4, 3, 2, 1})
+		spanID := pdata.NewSpanID([8]byte{1, 2, 3, 4, 5, 6, 7, 8})
+		parentSpanID := pdata.NewSpanID([8]byte{8, 7, 6, 5, 4, 3, 2, 1})
 		name := "span_name"
 		var startTime pdata.TimestampUnixNano = 123
 		var endTime pdata.TimestampUnixNano = 1234567890
@@ -208,12 +184,10 @@ func TestSpanToSentrySpan(t *testing.T) {
 		testSpan.SetEndTime(endTime)
 		testSpan.SetKind(kind)
 
-		testSpan.Status().InitEmpty()
 		testSpan.Status().SetMessage(statusMessage)
-		testSpan.Status().SetCode(pdata.StatusCode(otlptrace.Status_Ok))
+		testSpan.Status().SetCode(pdata.StatusCodeOk)
 
 		library := pdata.NewInstrumentationLibrary()
-		library.InitEmpty()
 		library.SetName("otel-python")
 		library.SetVersion("1.4.3")
 
@@ -380,29 +354,27 @@ type SpanStatusCase struct {
 func TestStatusFromSpanStatus(t *testing.T) {
 	testCases := []SpanStatusCase{
 		{
-			testName:   "with nil status",
+			testName:   "with empty status",
 			spanStatus: pdata.NewSpanStatus(),
-			status:     "",
+			status:     "unknown",
 			message:    "",
 		},
 		{
 			testName: "with status code",
 			spanStatus: func() pdata.SpanStatus {
 				spanStatus := pdata.NewSpanStatus()
-				spanStatus.InitEmpty()
 				spanStatus.SetMessage("message")
-				spanStatus.SetCode(pdata.StatusCode(otlptrace.Status_ResourceExhausted))
+				spanStatus.SetCode(pdata.StatusCodeError)
 
 				return spanStatus
 			}(),
-			status:  "resource_exhausted",
+			status:  "unknown",
 			message: "message",
 		},
 		{
 			testName: "with unimplemented status code",
 			spanStatus: func() pdata.SpanStatus {
 				spanStatus := pdata.NewSpanStatus()
-				spanStatus.InitEmpty()
 				spanStatus.SetMessage("message")
 				spanStatus.SetCode(pdata.StatusCode(1337))
 
@@ -538,7 +510,7 @@ func TestPushTraceData(t *testing.T) {
 			td: func() pdata.Traces {
 				traces := pdata.NewTraces()
 				resourceSpans := pdata.NewResourceSpans()
-				traces.ResourceSpans().Append(&resourceSpans)
+				traces.ResourceSpans().Append(resourceSpans)
 				return traces
 			}(),
 			called: false,
@@ -549,7 +521,6 @@ func TestPushTraceData(t *testing.T) {
 				traces := pdata.NewTraces()
 				resourceSpans := traces.ResourceSpans()
 				resourceSpans.Resize(1)
-				resourceSpans.At(0).InitEmpty()
 				resourceSpans.At(0).InstrumentationLibrarySpans().Resize(1)
 				return traces
 			}(),
@@ -561,7 +532,6 @@ func TestPushTraceData(t *testing.T) {
 				traces := pdata.NewTraces()
 				resourceSpans := traces.ResourceSpans()
 				resourceSpans.Resize(1)
-				resourceSpans.At(0).InitEmpty()
 				resourceSpans.At(0).InstrumentationLibrarySpans().Resize(1)
 				resourceSpans.At(0).InstrumentationLibrarySpans().At(0).Spans().Resize(1)
 				return traces

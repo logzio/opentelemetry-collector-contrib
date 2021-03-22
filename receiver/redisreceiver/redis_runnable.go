@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/consumer/pdata"
 	"go.opentelemetry.io/collector/obsreport"
 	"go.uber.org/zap"
 
@@ -31,7 +32,7 @@ var _ interval.Runnable = (*redisRunnable)(nil)
 // and feeding them to a metricsConsumer.
 type redisRunnable struct {
 	ctx             context.Context
-	metricsConsumer consumer.MetricsConsumerOld
+	metricsConsumer consumer.MetricsConsumer
 	redisSvc        *redisSvc
 	redisMetrics    []*redisMetric
 	logger          *zap.Logger
@@ -43,7 +44,7 @@ func newRedisRunnable(
 	ctx context.Context,
 	client client,
 	serviceName string,
-	metricsConsumer consumer.MetricsConsumerOld,
+	metricsConsumer consumer.MetricsConsumer,
 	logger *zap.Logger,
 ) *redisRunnable {
 	return &redisRunnable{
@@ -74,13 +75,13 @@ func (r *redisRunnable) Run() error {
 
 	inf, err := r.redisSvc.info()
 	if err != nil {
-		obsreport.EndMetricsReceiveOp(ctx, dataFormat, 0, 0, err)
+		obsreport.EndMetricsReceiveOp(ctx, dataFormat, 0, err)
 		return nil
 	}
 
 	uptime, err := inf.getUptimeInSeconds()
 	if err != nil {
-		obsreport.EndMetricsReceiveOp(ctx, dataFormat, 0, 0, err)
+		obsreport.EndMetricsReceiveOp(ctx, dataFormat, 0, err)
 		return nil
 	}
 
@@ -90,7 +91,22 @@ func (r *redisRunnable) Run() error {
 		r.timeBundle.update(time.Now(), uptime)
 	}
 
-	metrics, warnings := inf.buildFixedProtoMetrics(r.redisMetrics, r.timeBundle)
+	pdm := pdata.NewMetrics()
+	rms := pdm.ResourceMetrics()
+
+	rm := pdata.NewResourceMetrics()
+	rms.Append(rm)
+	resource := rm.Resource()
+	rattrs := resource.Attributes()
+	rattrs.InsertString("service.name", r.serviceName)
+
+	ilms := rm.InstrumentationLibraryMetrics()
+
+	ilm := pdata.NewInstrumentationLibraryMetrics()
+	ilms.Append(ilm)
+
+	fixedMS, warnings := inf.buildFixedMetrics(r.redisMetrics, r.timeBundle)
+	fixedMS.MoveAndAppendTo(ilm.Metrics())
 	if warnings != nil {
 		r.logger.Warn(
 			"errors parsing redis string",
@@ -98,20 +114,18 @@ func (r *redisRunnable) Run() error {
 		)
 	}
 
-	keyspaceMetrics, warnings := inf.buildKeyspaceProtoMetrics(r.timeBundle)
-	metrics = append(metrics, keyspaceMetrics...)
+	keyspaceMS, warnings := inf.buildKeyspaceMetrics(r.timeBundle)
 	if warnings != nil {
 		r.logger.Warn(
 			"errors parsing keyspace string",
 			zap.Errors("parsing errors", warnings),
 		)
 	}
+	keyspaceMS.MoveAndAppendTo(ilm.Metrics())
 
-	md := newMetricsData(metrics, r.serviceName)
-
-	err = r.metricsConsumer.ConsumeMetricsData(r.ctx, *md)
-	numTimeSeries, numPoints := obsreport.CountMetricPoints(*md)
-	obsreport.EndMetricsReceiveOp(ctx, dataFormat, numPoints, numTimeSeries, err)
+	err = r.metricsConsumer.ConsumeMetrics(r.ctx, pdm)
+	_, numPoints := pdm.MetricAndDataPointCount()
+	obsreport.EndMetricsReceiveOp(ctx, dataFormat, numPoints, err)
 
 	return nil
 }

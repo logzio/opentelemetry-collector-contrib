@@ -16,14 +16,14 @@ package kubelet
 
 import metricspb "github.com/census-instrumentation/opencensus-proto/gen-go/metrics/v1"
 
-func cumulativeInt(metricName string, units string, value *uint64) *metricspb.Metric {
+func cumulativeInt(metricName string, value *uint64) *metricspb.Metric {
 	if value == nil {
 		return nil
 	}
 	return &metricspb.Metric{
 		MetricDescriptor: &metricspb.MetricDescriptor{
 			Name: metricName,
-			Unit: units,
+			Unit: "By",
 			Type: metricspb.MetricDescriptor_CUMULATIVE_INT64,
 		},
 		Timeseries: []*metricspb.TimeSeries{{
@@ -36,14 +36,14 @@ func cumulativeInt(metricName string, units string, value *uint64) *metricspb.Me
 	}
 }
 
-func cumulativeDouble(metricName string, units string, value *float64) *metricspb.Metric {
+func cumulativeDouble(metricName string, value *float64) *metricspb.Metric {
 	if value == nil {
 		return nil
 	}
 	return &metricspb.Metric{
 		MetricDescriptor: &metricspb.MetricDescriptor{
 			Name: metricName,
-			Unit: units,
+			Unit: "s",
 			Type: metricspb.MetricDescriptor_CUMULATIVE_DOUBLE,
 		},
 		Timeseries: []*metricspb.TimeSeries{{
@@ -60,11 +60,16 @@ func intGauge(metricName string, units string, value *uint64) *metricspb.Metric 
 	if value == nil {
 		return nil
 	}
+	return intGaugeWithDescription(metricName, units, "", value)
+}
+
+func intGaugeWithDescription(metricName string, units string, description string, value *uint64) *metricspb.Metric {
 	return &metricspb.Metric{
 		MetricDescriptor: &metricspb.MetricDescriptor{
-			Name: metricName,
-			Unit: units,
-			Type: metricspb.MetricDescriptor_GAUGE_INT64,
+			Name:        metricName,
+			Unit:        units,
+			Description: description,
+			Type:        metricspb.MetricDescriptor_GAUGE_INT64,
 		},
 		Timeseries: []*metricspb.TimeSeries{{
 			Points: []*metricspb.Point{{

@@ -15,27 +15,34 @@
 package signalfxexporter
 
 import (
+	"context"
 	"net/url"
 	"path"
 	"testing"
 	"time"
 
+	apmcorrelation "github.com/signalfx/signalfx-agent/pkg/apm/correlations"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenttest"
+	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/config/configmodels"
 	"go.opentelemetry.io/collector/config/configtest"
+	"go.opentelemetry.io/collector/exporter/exporterhelper"
 	"go.uber.org/zap"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/signalfxexporter/correlation"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/signalfxexporter/translation"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/common/splunk"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/signalfxexporter/translation/dpfilters"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/splunk"
 )
 
 func TestLoadConfig(t *testing.T) {
 	factories, err := componenttest.ExampleComponents()
 	assert.Nil(t, err)
 
-	factory := &Factory{}
+	factory := NewFactory()
 	factories.Exporters[configmodels.Type(typeStr)] = factory
 	cfg, err := configtest.LoadConfigFile(t, path.Join(".", "testdata", "config.yaml"), factories)
 
@@ -63,8 +70,20 @@ func TestLoadConfig(t *testing.T) {
 			"added-entry": "added value",
 			"dot.test":    "test",
 		},
-		Timeout: 2 * time.Second,
-		AccessTokenPassthroughConfig: splunk.AccessTokenPassthroughConfig{
+		TimeoutSettings: exporterhelper.TimeoutSettings{
+			Timeout: 2 * time.Second,
+		},
+		RetrySettings: exporterhelper.RetrySettings{
+			Enabled:         true,
+			InitialInterval: 10 * time.Second,
+			MaxInterval:     1 * time.Minute,
+			MaxElapsedTime:  10 * time.Minute,
+		},
+		QueueSettings: exporterhelper.QueueSettings{
+			Enabled:      true,
+			NumConsumers: 2,
+			QueueSize:    10,
+		}, AccessTokenPassthroughConfig: splunk.AccessTokenPassthroughConfig{
 			AccessTokenPassthrough: false,
 		},
 		SendCompatibleMetrics: true,
@@ -76,10 +95,73 @@ func TestLoadConfig(t *testing.T) {
 				},
 			},
 		},
+		ExcludeMetrics: []dpfilters.MetricFilter{
+			{
+				MetricName: "metric1",
+			},
+			{
+				MetricNames: []string{"metric2", "metric3"},
+			},
+			{
+				MetricName: "metric4",
+				Dimensions: map[string]interface{}{
+					"dimension_key": "dimension_val",
+				},
+			},
+			{
+				MetricName: "metric5",
+				Dimensions: map[string]interface{}{
+					"dimension_key": []interface{}{"dimension_val1", "dimension_val2"},
+				},
+			},
+			{
+				MetricName: `/cpu\..*/`,
+			},
+			{
+				MetricNames: []string{"cpu.util*", "memory.util*"},
+			},
+			{
+				MetricName: "cpu.utilization",
+				Dimensions: map[string]interface{}{
+					"container_name": "/^[A-Z][A-Z]$/",
+				},
+			},
+		},
+		IncludeMetrics: []dpfilters.MetricFilter{
+			{
+				MetricName: "metric1",
+			},
+			{
+				MetricNames: []string{"metric2", "metric3"},
+			},
+		},
+		DeltaTranslationTTL: 3600,
+		Correlation: &correlation.Config{
+			HTTPClientSettings: confighttp.HTTPClientSettings{
+				Endpoint: "",
+				Timeout:  5 * time.Second,
+			},
+			StaleServiceTimeout: 5 * time.Minute,
+			SyncAttributes: map[string]string{
+				"k8s.pod.uid":  "k8s.pod.uid",
+				"container.id": "container.id",
+			},
+			Config: apmcorrelation.Config{
+				MaxRequests:     20,
+				MaxBuffered:     10_000,
+				MaxRetries:      2,
+				LogUpdates:      false,
+				RetryDelay:      30 * time.Second,
+				CleanupInterval: 1 * time.Minute,
+			},
+			HostTranslations: map[string]string{
+				"host.name": "host",
+			},
+		},
 	}
 	assert.Equal(t, &expectedCfg, e1)
 
-	te, err := factory.CreateMetricsExporter(zap.NewNop(), e1)
+	te, err := factory.CreateMetricsExporter(context.Background(), component.ExporterCreateParams{Logger: zap.NewNop()}, e1)
 	require.NoError(t, err)
 	require.NotNil(t, te)
 }
@@ -95,6 +177,7 @@ func TestConfig_getOptionsFromConfig(t *testing.T) {
 		Headers               map[string]string
 		SendCompatibleMetrics bool
 		TranslationRules      []translation.Rule
+		SyncHostMetadata      bool
 	}
 	tests := []struct {
 		name    string
@@ -114,7 +197,7 @@ func TestConfig_getOptionsFromConfig(t *testing.T) {
 				ingestURL: &url.URL{
 					Scheme: "https",
 					Host:   "ingest.us1.signalfx.com",
-					Path:   "/v2/datapoint",
+					Path:   "/",
 				},
 				apiURL: &url.URL{
 					Scheme: "https",
@@ -137,7 +220,7 @@ func TestConfig_getOptionsFromConfig(t *testing.T) {
 				ingestURL: &url.URL{
 					Scheme: "https",
 					Host:   "ingest.us0.signalfx.com",
-					Path:   "/v2/datapoint",
+					Path:   "",
 				},
 				apiURL: &url.URL{
 					Scheme: "https",
@@ -203,15 +286,18 @@ func TestConfig_getOptionsFromConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &Config{
-				ExporterSettings:      tt.fields.ExporterSettings,
-				AccessToken:           tt.fields.AccessToken,
-				Realm:                 tt.fields.Realm,
-				IngestURL:             tt.fields.IngestURL,
-				APIURL:                tt.fields.APIURL,
-				Timeout:               tt.fields.Timeout,
+				ExporterSettings: tt.fields.ExporterSettings,
+				AccessToken:      tt.fields.AccessToken,
+				Realm:            tt.fields.Realm,
+				IngestURL:        tt.fields.IngestURL,
+				APIURL:           tt.fields.APIURL,
+				TimeoutSettings: exporterhelper.TimeoutSettings{
+					Timeout: tt.fields.Timeout,
+				},
 				Headers:               tt.fields.Headers,
 				SendCompatibleMetrics: tt.fields.SendCompatibleMetrics,
 				TranslationRules:      tt.fields.TranslationRules,
+				SyncHostMetadata:      tt.fields.SyncHostMetadata,
 			}
 			got, err := cfg.getOptionsFromConfig()
 			if (err != nil) != tt.wantErr {

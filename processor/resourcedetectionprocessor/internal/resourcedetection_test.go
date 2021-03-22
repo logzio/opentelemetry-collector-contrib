@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer/pdata"
 	"go.uber.org/zap"
 )
@@ -36,6 +37,12 @@ type MockDetector struct {
 func (p *MockDetector) Detect(ctx context.Context) (pdata.Resource, error) {
 	args := p.Called()
 	return args.Get(0).(pdata.Resource), args.Error(1)
+}
+
+type mockDetectorConfig struct{}
+
+func (d *mockDetectorConfig) GetConfigFromType(detectorType DetectorType) DetectorConfig {
+	return nil
 }
 
 func TestDetect(t *testing.T) {
@@ -73,7 +80,7 @@ func TestDetect(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mockDetectors := make(map[DetectorType]Detector, len(tt.detectedResources))
+			mockDetectors := make(map[DetectorType]DetectorFactory, len(tt.detectedResources))
 			mockDetectorTypes := make([]DetectorType, 0, len(tt.detectedResources))
 
 			for i, res := range tt.detectedResources {
@@ -81,12 +88,14 @@ func TestDetect(t *testing.T) {
 				md.On("Detect").Return(res, nil)
 
 				mockDetectorType := DetectorType(fmt.Sprintf("mockdetector%v", i))
-				mockDetectors[mockDetectorType] = md
+				mockDetectors[mockDetectorType] = func(component.ProcessorCreateParams, DetectorConfig) (Detector, error) {
+					return md, nil
+				}
 				mockDetectorTypes = append(mockDetectorTypes, mockDetectorType)
 			}
 
 			f := NewProviderFactory(mockDetectors)
-			p, err := f.CreateResourceProvider(zap.NewNop(), time.Second, mockDetectorTypes...)
+			p, err := f.CreateResourceProvider(component.ProcessorCreateParams{Logger: zap.NewNop()}, time.Second, &mockDetectorConfig{}, mockDetectorTypes...)
 			require.NoError(t, err)
 
 			got, err := p.Get(context.Background())
@@ -101,9 +110,20 @@ func TestDetect(t *testing.T) {
 
 func TestDetectResource_InvalidDetectorType(t *testing.T) {
 	mockDetectorKey := DetectorType("mock")
-	p := NewProviderFactory(map[DetectorType]Detector{})
-	_, err := p.CreateResourceProvider(zap.NewNop(), time.Second, mockDetectorKey)
+	p := NewProviderFactory(map[DetectorType]DetectorFactory{})
+	_, err := p.CreateResourceProvider(component.ProcessorCreateParams{Logger: zap.NewNop()}, time.Second, &mockDetectorConfig{}, mockDetectorKey)
 	require.EqualError(t, err, fmt.Sprintf("invalid detector key: %v", mockDetectorKey))
+}
+
+func TestDetectResource_DetectoryFactoryError(t *testing.T) {
+	mockDetectorKey := DetectorType("mock")
+	p := NewProviderFactory(map[DetectorType]DetectorFactory{
+		mockDetectorKey: func(component.ProcessorCreateParams, DetectorConfig) (Detector, error) {
+			return nil, errors.New("creation failed")
+		},
+	})
+	_, err := p.CreateResourceProvider(component.ProcessorCreateParams{Logger: zap.NewNop()}, time.Second, &mockDetectorConfig{}, mockDetectorKey)
+	require.EqualError(t, err, fmt.Sprintf("failed creating detector type %q: %v", mockDetectorKey, "creation failed"))
 }
 
 func TestDetectResource_Error(t *testing.T) {
@@ -118,16 +138,37 @@ func TestDetectResource_Error(t *testing.T) {
 	require.EqualError(t, err, "err1")
 }
 
-func TestMergeOverride(t *testing.T) {
-	res1 := NewResource(map[string]interface{}{"a": "11", "b": "2"})
-	res2 := NewResource(map[string]interface{}{"a": "1", "c": "3"})
-	MergeResource(res1, res2, true)
-
-	expected := NewResource(map[string]interface{}{"a": "1", "b": "2", "c": "3"})
-
-	expected.Attributes().Sort()
-	res1.Attributes().Sort()
-	assert.Equal(t, expected, res1)
+func TestMergeResource(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		res1       pdata.Resource
+		res2       pdata.Resource
+		overrideTo bool
+		expected   pdata.Resource
+	}{
+		{
+			name:       "override non-empty resources",
+			res1:       NewResource(map[string]interface{}{"a": "11", "b": "2"}),
+			res2:       NewResource(map[string]interface{}{"a": "1", "c": "3"}),
+			overrideTo: true,
+			expected:   NewResource(map[string]interface{}{"a": "1", "b": "2", "c": "3"}),
+		}, {
+			name:       "empty resource",
+			res1:       pdata.NewResource(),
+			res2:       NewResource(map[string]interface{}{"a": "1", "c": "3"}),
+			overrideTo: false,
+			expected:   NewResource(map[string]interface{}{"a": "1", "c": "3"}),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out := pdata.NewResource()
+			tt.res1.CopyTo(out)
+			MergeResource(out, tt.res2, tt.overrideTo)
+			tt.expected.Attributes().Sort()
+			out.Attributes().Sort()
+			assert.Equal(t, tt.expected, out)
+		})
+	}
 }
 
 type MockParallelDetector struct {
@@ -183,4 +224,38 @@ func TestDetectResource_Parallel(t *testing.T) {
 	wg.Wait()
 	md1.AssertNumberOfCalls(t, "Detect", 1)
 	md2.AssertNumberOfCalls(t, "Detect", 1)
+}
+
+func TestAttributesToMap(t *testing.T) {
+	m := map[string]interface{}{
+		"str":    "a",
+		"int":    int64(5),
+		"double": 5.0,
+		"bool":   true,
+		"map": map[string]interface{}{
+			"inner": "val",
+		},
+		"array": []interface{}{
+			"inner",
+			int64(42),
+		},
+	}
+	attr := pdata.NewAttributeMap()
+	attr.InsertString("str", "a")
+	attr.InsertInt("int", 5)
+	attr.InsertDouble("double", 5.0)
+	attr.InsertBool("bool", true)
+	avm := pdata.NewAttributeValueMap()
+	innerAttr := avm.MapVal()
+	innerAttr.InsertString("inner", "val")
+	attr.Insert("map", avm)
+
+	ava := pdata.NewAttributeValueArray()
+	arrayAttr := ava.ArrayVal()
+	arrayAttr.Resize(2)
+	arrayAttr.At(0).SetStringVal("inner")
+	arrayAttr.At(1).SetIntVal(42)
+	attr.Insert("array", ava)
+
+	assert.Equal(t, m, AttributesToMap(attr))
 }

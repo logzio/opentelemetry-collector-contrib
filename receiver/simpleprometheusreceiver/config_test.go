@@ -15,6 +15,7 @@
 package simpleprometheusreceiver
 
 import (
+	"net/url"
 	"path"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ func TestLoadConfig(t *testing.T) {
 	factories, err := componenttest.ExampleComponents()
 	assert.Nil(t, err)
 
-	factory := &Factory{}
+	factory := NewFactory()
 	receiverType := "prometheus_simple"
 	factories.Receivers[configmodels.Type(receiverType)] = factory
 	cfg, err := configtest.LoadConfigFile(
@@ -67,6 +68,7 @@ func TestLoadConfig(t *testing.T) {
 			},
 			CollectionInterval: 30 * time.Second,
 			MetricsPath:        "/v2/metrics",
+			Params:             url.Values{"columns": []string{"name", "messages"}, "key": []string{"foo", "bar"}},
 			UseServiceAccount:  true,
 		})
 

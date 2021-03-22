@@ -39,18 +39,42 @@ import (
 func newElasticTraceExporter(
 	params component.ExporterCreateParams,
 	cfg configmodels.Exporter,
-) (component.TraceExporter, error) {
+) (component.TracesExporter, error) {
 	exporter, err := newElasticExporter(cfg.(*Config), params.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("cannot configure Elastic APM trace exporter: %v", err)
 	}
-	return exporterhelper.NewTraceExporter(cfg, func(ctx context.Context, traces pdata.Traces) (int, error) {
+	return exporterhelper.NewTraceExporter(cfg, params.Logger, func(ctx context.Context, traces pdata.Traces) (int, error) {
 		var dropped int
 		var errs []error
 		resourceSpansSlice := traces.ResourceSpans()
 		for i := 0; i < resourceSpansSlice.Len(); i++ {
 			resourceSpans := resourceSpansSlice.At(i)
 			n, err := exporter.ExportResourceSpans(ctx, resourceSpans)
+			if err != nil {
+				errs = append(errs, err)
+			}
+			dropped += n
+		}
+		return dropped, componenterror.CombineErrors(errs)
+	})
+}
+
+func newElasticMetricsExporter(
+	params component.ExporterCreateParams,
+	cfg configmodels.Exporter,
+) (component.MetricsExporter, error) {
+	exporter, err := newElasticExporter(cfg.(*Config), params.Logger)
+	if err != nil {
+		return nil, fmt.Errorf("cannot configure Elastic APM metrics exporter: %v", err)
+	}
+	return exporterhelper.NewMetricsExporter(cfg, params.Logger, func(ctx context.Context, input pdata.Metrics) (int, error) {
+		var dropped int
+		var errs []error
+		resourceMetricsSlice := input.ResourceMetrics()
+		for i := 0; i < resourceMetricsSlice.Len(); i++ {
+			resourceMetrics := resourceMetricsSlice.At(i)
+			n, err := exporter.ExportResourceMetrics(ctx, resourceMetrics)
 			if err != nil {
 				errs = append(errs, err)
 			}
@@ -120,7 +144,7 @@ func (e *elasticExporter) ExportResourceSpans(ctx context.Context, rs pdata.Reso
 			count++
 			span := spanSlice.At(i)
 			before := w.Size()
-			if err := elastic.EncodeSpan(span, instrumentationLibrary, &w); err != nil {
+			if err := elastic.EncodeSpan(span, instrumentationLibrary, rs.Resource(), &w); err != nil {
 				w.Rewind(before)
 				errs = append(errs, err)
 			}
@@ -130,6 +154,32 @@ func (e *elasticExporter) ExportResourceSpans(ctx context.Context, rs pdata.Reso
 		return count, err
 	}
 	return len(errs), componenterror.CombineErrors(errs)
+}
+
+// ExportResourceMetrics exports OTLP metrics to Elastic APM Server,
+// returning the number of metrics that were dropped along with any errors.
+func (e *elasticExporter) ExportResourceMetrics(ctx context.Context, rm pdata.ResourceMetrics) (int, error) {
+	var w fastjson.Writer
+	elastic.EncodeResourceMetadata(rm.Resource(), &w)
+	var errs []error
+	var totalDropped int
+	instrumentationLibraryMetricsSlice := rm.InstrumentationLibraryMetrics()
+	for i := 0; i < instrumentationLibraryMetricsSlice.Len(); i++ {
+		instrumentationLibraryMetrics := instrumentationLibraryMetricsSlice.At(i)
+		instrumentationLibrary := instrumentationLibraryMetrics.InstrumentationLibrary()
+		metrics := instrumentationLibraryMetrics.Metrics()
+		before := w.Size()
+		dropped, err := elastic.EncodeMetrics(metrics, instrumentationLibrary, &w)
+		if err != nil {
+			w.Rewind(before)
+			errs = append(errs, err)
+		}
+		totalDropped += dropped
+	}
+	if err := e.sendEvents(ctx, &w); err != nil {
+		return totalDropped, err
+	}
+	return totalDropped, componenterror.CombineErrors(errs)
 }
 
 func (e *elasticExporter) sendEvents(ctx context.Context, w *fastjson.Writer) error {

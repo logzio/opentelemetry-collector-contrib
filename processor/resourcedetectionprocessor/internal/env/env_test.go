@@ -21,10 +21,18 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer/pdata"
+	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourcedetectionprocessor/internal"
 )
+
+func TestNewDetector(t *testing.T) {
+	d, err := NewDetector(component.ProcessorCreateParams{Logger: zap.NewNop()}, nil)
+	assert.NotNil(t, d)
+	assert.NoError(t, err)
+}
 
 func TestDetectTrue(t *testing.T) {
 	os.Setenv(envVar, "key=value")

@@ -19,9 +19,9 @@ import (
 	"fmt"
 	"net/url"
 	"path"
-	"time"
 
 	"go.opentelemetry.io/collector/config/configmodels"
+	"go.opentelemetry.io/collector/exporter/exporterhelper"
 )
 
 const (
@@ -31,9 +31,12 @@ const (
 
 // Config defines configuration for Splunk exporter.
 type Config struct {
-	configmodels.ExporterSettings `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct.
+	configmodels.ExporterSettings  `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct.
+	exporterhelper.TimeoutSettings `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct.
+	exporterhelper.QueueSettings   `mapstructure:"sending_queue"`
+	exporterhelper.RetrySettings   `mapstructure:"retry_on_failure"`
 
-	// HEC Token is the authentication token provided by Splunk.
+	// HEC Token is the authentication token provided by Splunk: https://docs.splunk.com/Documentation/Splunk/latest/Data/UsetheHTTPEventCollector.
 	Token string `mapstructure:"token"`
 
 	// URL is the Splunk HEC endpoint where data is going to be sent to.
@@ -54,10 +57,6 @@ type Config struct {
 
 	// Disable GZip compression. Defaults to false.
 	DisableCompression bool `mapstructure:"disable_compression"`
-
-	// Timeout is the maximum timeout for HTTP request sending trace data. The
-	// default value is 10 seconds.
-	Timeout time.Duration `mapstructure:"timeout"`
 
 	// insecure_skip_verify skips checking the certificate of the HEC endpoint when sending data over HTTPS. Defaults to false.
 	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify"`

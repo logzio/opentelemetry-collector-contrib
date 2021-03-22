@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// +build !windows
+// TODO review if tests should succeed on Windows
+
 package kubelet
 
 import (
@@ -26,12 +29,11 @@ import (
 	"go.opentelemetry.io/collector/config/configtls"
 	"go.uber.org/zap"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/common/k8sconfig"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/k8sconfig"
 )
 
 const certPath = "../testdata/testcert.crt"
 const keyFile = "../testdata/testkey.key"
-const tokenPath = "../testdata/token"
 
 func TestClient(t *testing.T) {
 	tr := &fakeRoundTripper{}
@@ -95,7 +97,7 @@ func TestSvcAcctClient(t *testing.T) {
 	p := &saClientProvider{
 		endpoint:   "localhost:9876",
 		caCertPath: certPath,
-		tokenPath:  tokenPath,
+		tokenPath:  "../testdata/token",
 		logger:     zap.NewNop(),
 	}
 	cl, err := p.BuildClient()
@@ -175,7 +177,7 @@ func TestBuildReq(t *testing.T) {
 	p := &saClientProvider{
 		endpoint:   "localhost:9876",
 		caCertPath: certPath,
-		tokenPath:  tokenPath,
+		tokenPath:  "../testdata/token",
 		logger:     zap.NewNop(),
 	}
 	cl, err := p.BuildClient()
@@ -190,7 +192,7 @@ func TestBuildBadReq(t *testing.T) {
 	p := &saClientProvider{
 		endpoint:   "localhost:9876",
 		caCertPath: certPath,
-		tokenPath:  tokenPath,
+		tokenPath:  "../testdata/token",
 		logger:     zap.NewNop(),
 	}
 	cl, err := p.BuildClient()

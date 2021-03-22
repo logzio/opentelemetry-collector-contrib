@@ -19,10 +19,10 @@ import (
 
 	metricspb "github.com/census-instrumentation/opencensus-proto/gen-go/metrics/v1"
 	resourcepb "github.com/census-instrumentation/opencensus-proto/gen-go/resource/v1"
-	"github.com/golang/protobuf/ptypes/timestamp"
 	"go.opentelemetry.io/collector/consumer/consumerdata"
 	"go.opentelemetry.io/collector/translator/conventions"
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	stats "k8s.io/kubernetes/pkg/kubelet/apis/stats/v1alpha1"
 )
 
@@ -32,16 +32,18 @@ const (
 	ContainerMetricGroup = MetricGroup("container")
 	PodMetricGroup       = MetricGroup("pod")
 	NodeMetricGroup      = MetricGroup("node")
+	VolumeMetricGroup    = MetricGroup("volume")
 )
 
 var ValidMetricGroups = map[MetricGroup]bool{
 	ContainerMetricGroup: true,
 	PodMetricGroup:       true,
 	NodeMetricGroup:      true,
+	VolumeMetricGroup:    true,
 }
 
 type metricDataAccumulator struct {
-	m                     []*consumerdata.MetricsData
+	m                     []consumerdata.MetricsData
 	metadata              Metadata
 	logger                *zap.Logger
 	metricGroupsToCollect map[MetricGroup]bool
@@ -53,6 +55,7 @@ const (
 	nodePrefix      = k8sPrefix + "node."
 	podPrefix       = k8sPrefix + "pod."
 	containerPrefix = "container."
+	volumePrefix    = k8sPrefix + "volume."
 )
 
 func (a *metricDataAccumulator) nodeStats(s stats.NodeStats) {
@@ -62,7 +65,7 @@ func (a *metricDataAccumulator) nodeStats(s stats.NodeStats) {
 
 	// todo s.Runtime.ImageFs
 	a.accumulate(
-		timestampProto(s.StartTime.Time),
+		timestamppb.New(s.StartTime.Time),
 		nodeResource(s),
 
 		cpuMetrics(nodePrefix, s.CPU),
@@ -78,7 +81,7 @@ func (a *metricDataAccumulator) podStats(podResource *resourcepb.Resource, s sta
 	}
 
 	a.accumulate(
-		timestampProto(s.StartTime.Time),
+		timestamppb.New(s.StartTime.Time),
 		podResource,
 
 		cpuMetrics(podPrefix, s.CPU),
@@ -102,7 +105,7 @@ func (a *metricDataAccumulator) containerStats(podResource *resourcepb.Resource,
 
 	// todo s.Logs
 	a.accumulate(
-		timestampProto(s.StartTime.Time),
+		timestamppb.New(s.StartTime.Time),
 		resource,
 
 		cpuMetrics(containerPrefix, s.CPU),
@@ -111,8 +114,31 @@ func (a *metricDataAccumulator) containerStats(podResource *resourcepb.Resource,
 	)
 }
 
+func (a *metricDataAccumulator) volumeStats(podResource *resourcepb.Resource, s stats.VolumeStats) {
+	if !a.metricGroupsToCollect[VolumeMetricGroup] {
+		return
+	}
+
+	volume, err := volumeResource(podResource, s, a.metadata)
+	if err != nil {
+		a.logger.Warn(
+			"Failed to gather additional volume metadata. Skipping metric collection.",
+			zap.String("pod", podResource.Labels[conventions.AttributeK8sPod]),
+			zap.String("volume", podResource.Labels[labelVolumeName]),
+			zap.Error(err),
+		)
+		return
+	}
+
+	a.accumulate(
+		nil,
+		volume,
+		volumeMetrics(volumePrefix, s),
+	)
+}
+
 func (a *metricDataAccumulator) accumulate(
-	startTime *timestamp.Timestamp,
+	startTime *timestamppb.Timestamp,
 	r *resourcepb.Resource,
 	m ...[]*metricspb.Metric,
 ) {
@@ -125,7 +151,7 @@ func (a *metricDataAccumulator) accumulate(
 			}
 		}
 	}
-	a.m = append(a.m, &consumerdata.MetricsData{
+	a.m = append(a.m, consumerdata.MetricsData{
 		Resource: r,
 		Metrics:  resourceMetrics,
 	})

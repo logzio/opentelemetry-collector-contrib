@@ -1,5 +1,8 @@
 extensions:
   health_check:
+  http_forwarder:
+    egress:
+      endpoint: "https://api.${SFX_REALM}.signalfx.com"
   zpages:
 receivers:
   sapm:
@@ -31,7 +34,7 @@ processors:
   #attributes/copyfromexistingkey:
     #actions:
     #- key: environment
-      #from_attribute: YOUR_EXISTING_TAG_NAMEE
+      #from_attribute: YOUR_EXISTING_TAG_NAME
       #action: upsert
   # Optional: If you want to add an environment tag
   # If this option is enabled it must be added to the pipeline section below
@@ -40,7 +43,6 @@ processors:
     #- key: environment
       #value: "YOUR_ENVIRONMENT_NAME"
       #action: insert
-  queued_retry:
   # Enabling the memory_limiter is strongly recommended for every pipeline.
   # Configuration is based on the amount of memory allocated to the collector.
   # The configuration below assumes 2GB of memory. In general, the ballast
@@ -58,20 +60,29 @@ processors:
 exporters:
   # Traces
   sapm:
-    access_token: "YOUR_ACCESS_TOKEN"
-    endpoint: "https://ingest.YOUR_SIGNALFX_REALM.signalfx.com/v2/trace"
-  # Metrics
+    # This expects SFX_TOKEN environment variable to contain the access token.
+    # Alternatively, specify the access token directly here.
+    access_token: "${SFX_TOKEN}"
+    # This expects SFX_REALM environment variable to contain the realm (e.g. us0).
+    # Alternatively, specify the relm directly in the endpoint url here.
+    endpoint: "https://ingest.${SFX_REALM}.signalfx.com/v2/trace"
+  # Metrics + Events
   signalfx:
-    access_token: "YOUR_ACCESS_TOKEN"
-    realm: "YOUR_SIGNALFX_REALM"
+    # See above for SFX_TOKEN and SFX_REALM.
+    access_token: "${SFX_TOKEN}"
+    realm: "${SFX_REALM}"
 service:
   pipelines:
     traces:
       receivers: [sapm, zipkin]
-      processors: [memory_limiter, batch, queued_retry]
+      processors: [memory_limiter, batch]
       exporters: [sapm]
     metrics:
       receivers: [signalfx, prometheus]
       processors: [memory_limiter, batch]
       exporters: [signalfx]
-  extensions: [health_check, zpages]
+    logs:
+      receivers: [signalfx]
+      processors: [memory_limiter, batch]
+      exporters: [signalfx]
+  extensions: [health_check, http_forwarder, zpages]

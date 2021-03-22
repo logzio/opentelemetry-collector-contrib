@@ -17,12 +17,14 @@ package stackdriverexporter
 import (
 	"path"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/config/configmodels"
 	"go.opentelemetry.io/collector/config/configtest"
+	"go.opentelemetry.io/collector/exporter/exporterhelper"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -46,13 +48,14 @@ func TestLoadConfig(t *testing.T) {
 	r1 := cfg.Exporters["stackdriver/customname"].(*Config)
 	assert.Equal(t, r1,
 		&Config{
-			ExporterSettings:           configmodels.ExporterSettings{TypeVal: configmodels.Type(typeStr), NameVal: "stackdriver/customname"},
-			ProjectID:                  "my-project",
-			Prefix:                     "prefix",
-			Endpoint:                   "test-endpoint",
-			NumOfWorkers:               3,
-			SkipCreateMetricDescriptor: true,
-			UseInsecure:                true,
+			ExporterSettings: configmodels.ExporterSettings{TypeVal: configmodels.Type(typeStr), NameVal: "stackdriver/customname"},
+			ProjectID:        "my-project",
+			UserAgent:        "opentelemetry-collector-contrib {{version}}",
+			Endpoint:         "test-endpoint",
+			UseInsecure:      true,
+			TimeoutSettings: exporterhelper.TimeoutSettings{
+				Timeout: 20 * time.Second,
+			},
 			ResourceMappings: []ResourceMapping{
 				{
 					SourceType: "source.resource1",
@@ -74,6 +77,18 @@ func TestLoadConfig(t *testing.T) {
 					SourceType: "source.resource2",
 					TargetType: "target-resource2",
 				},
+			},
+			NumOfWorkers: 3,
+			TraceConfig: TraceConfig{
+				BundleDelayThreshold: 2 * time.Second,
+				BundleCountThreshold: 50,
+				BundleByteThreshold:  15000,
+				BundleByteLimit:      0,
+				BufferMaxBytes:       8000000,
+			},
+			MetricConfig: MetricConfig{
+				Prefix:                     "prefix",
+				SkipCreateMetricDescriptor: true,
 			},
 		})
 }

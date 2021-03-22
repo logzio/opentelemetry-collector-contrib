@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
 	"go.uber.org/zap"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/kubeletstatsreceiver/kubelet"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/redisreceiver/interval"
@@ -31,7 +32,7 @@ var _ component.MetricsReceiver = (*receiver)(nil)
 type receiver struct {
 	options  *receiverOptions
 	logger   *zap.Logger
-	consumer consumer.MetricsConsumerOld
+	consumer consumer.MetricsConsumer
 	runner   *interval.Runner
 	rest     kubelet.RestClient
 }
@@ -41,17 +42,18 @@ type receiverOptions struct {
 	collectionInterval    time.Duration
 	extraMetadataLabels   []kubelet.MetadataLabel
 	metricGroupsToCollect map[kubelet.MetricGroup]bool
+	k8sAPIClient          kubernetes.Interface
 }
 
 func newReceiver(rOptions *receiverOptions,
 	logger *zap.Logger, rest kubelet.RestClient,
-	next consumer.MetricsConsumerOld) (*receiver, error) {
+	next consumer.MetricsConsumer) *receiver {
 	return &receiver{
 		options:  rOptions,
 		logger:   logger,
 		consumer: next,
 		rest:     rest,
-	}, nil
+	}
 }
 
 // Creates and starts the kubelet stats runnable.

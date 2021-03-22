@@ -17,6 +17,7 @@
 package elastic
 
 import (
+	"fmt"
 	"net"
 	"net/url"
 	"strconv"
@@ -30,19 +31,26 @@ import (
 
 // EncodeSpan encodes an OpenTelemetry span, and instrumentation library information,
 // as a transaction or span line, writing to w.
-func EncodeSpan(otlpSpan pdata.Span, otlpLibrary pdata.InstrumentationLibrary, w *fastjson.Writer) error {
-	var spanID, parentID model.SpanID
-	var traceID model.TraceID
-	copy(spanID[:], otlpSpan.SpanID())
-	copy(traceID[:], otlpSpan.TraceID())
-	copy(parentID[:], otlpSpan.ParentSpanID())
+//
+// otlpResource is used for language-specific translations, such as parsing stacktraces.
+//
+// TODO(axw) otlpLibrary is currently not used. We should consider recording it as metadata.
+func EncodeSpan(
+	otlpSpan pdata.Span,
+	otlpLibrary pdata.InstrumentationLibrary,
+	otlpResource pdata.Resource,
+	w *fastjson.Writer,
+) error {
+	spanID := model.SpanID(otlpSpan.SpanID().Bytes())
+	traceID := model.TraceID(otlpSpan.TraceID().Bytes())
+	parentID := model.SpanID(otlpSpan.ParentSpanID().Bytes())
 	root := parentID == model.SpanID{}
 
 	startTime := time.Unix(0, int64(otlpSpan.StartTime())).UTC()
 	endTime := time.Unix(0, int64(otlpSpan.EndTime())).UTC()
 	durationMillis := endTime.Sub(startTime).Seconds() * 1000
 
-	name := otlpSpan.Name()
+	name := truncate(otlpSpan.Name())
 	var transactionContext transactionContext
 	if root || otlpSpan.Kind() == pdata.SpanKindSERVER {
 		transaction := model.Transaction{
@@ -83,12 +91,9 @@ func EncodeSpan(otlpSpan pdata.Span, otlpLibrary pdata.InstrumentationLibrary, w
 		}
 		w.RawString("}\n")
 	}
-
-	// TODO(axw) we don't currently support sending arbitrary events
-	// to Elastic APM Server. If/when we do, we should also transmit
-	// otlpSpan.TimeEvents. When there's a convention specified for
-	// error events, we could send those.
-
+	if err := encodeSpanEvents(otlpSpan.Events(), otlpResource, traceID, spanID, w); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -178,15 +183,16 @@ func setTransactionProperties(
 		}
 	})
 
-	if !otlpLibrary.IsNil() {
-		context.setFramework(otlpLibrary.Name(), otlpLibrary.Version())
-	}
+	context.setFramework(otlpLibrary.Name(), otlpLibrary.Version())
 
-	statusCode := pdata.StatusCode(0) // Default span staus is "Ok"
-	if status := otlpSpan.Status(); !status.IsNil() {
-		statusCode = status.Code()
+	status := otlpSpan.Status()
+	tx.Outcome = spanStatusOutcome(status)
+	switch status.Code() {
+	case pdata.StatusCodeOk:
+		tx.Result = "OK"
+	case pdata.StatusCodeError:
+		tx.Result = "Error"
 	}
-	tx.Result = statusCode.String()
 
 	tx.Type = "unknown"
 	if context.model.Request != nil {
@@ -249,7 +255,7 @@ func setSpanProperties(otlpSpan pdata.Span, span *model.Span) error {
 
 		// net.*
 		case conventions.AttributeNetPeerName:
-			netPeerIP = v.StringVal()
+			netPeerName = v.StringVal()
 		case conventions.AttributeNetPeerIP:
 			netPeerIP = v.StringVal()
 		case conventions.AttributeNetPeerPort:
@@ -277,6 +283,12 @@ func setSpanProperties(otlpSpan pdata.Span, span *model.Span) error {
 		}
 	})
 
+	destPort := netPeerPort
+	destAddr := netPeerName
+	if destAddr == "" {
+		destAddr = netPeerIP
+	}
+
 	span.Type = "app"
 	if context.model.HTTP != nil {
 		span.Type = "external"
@@ -288,27 +300,114 @@ func setSpanProperties(otlpSpan pdata.Span, span *model.Span) error {
 				// a failsafe.
 				context.http.URL.Scheme = "http"
 			}
-			if context.http.URL.Host == "" {
-				hostname := netPeerName
-				if hostname == "" {
-					hostname = netPeerIP
+
+			if context.http.URL.Host != "" {
+				// Set destination.{address,port} from http.url.host.
+				destAddr = context.http.URL.Hostname()
+				if portString := context.http.URL.Port(); portString != "" {
+					destPort, _ = strconv.Atoi(context.http.URL.Port())
+				} else {
+					destPort = schemeDefaultPort(context.http.URL.Scheme)
 				}
-				if hostname != "" {
-					host := hostname
-					if netPeerPort > 0 {
-						port := strconv.Itoa(netPeerPort)
-						host = net.JoinHostPort(hostname, port)
-					}
-					context.http.URL.Host = host
+			} else if destAddr != "" {
+				// Set http.url.host from net.peer.*
+				host := destAddr
+				if destPort > 0 {
+					port := strconv.Itoa(destPort)
+					host = net.JoinHostPort(destAddr, port)
+				}
+				context.http.URL.Host = host
+				if destPort == 0 {
+					// Set destPort after setting http.url.host, so that
+					// we don't include the default port there.
+					destPort = schemeDefaultPort(context.http.URL.Scheme)
 				}
 			}
+
+			// See https://github.com/elastic/apm/issues/180 for rules about setting
+			// destination.service.* for external HTTP requests.
+			destinationServiceURL := url.URL{Scheme: context.http.URL.Scheme, Host: context.http.URL.Host}
+			destinationServiceResource := destinationServiceURL.Host
+			if destPort != 0 && destPort == schemeDefaultPort(context.http.URL.Scheme) {
+				if destinationServiceURL.Port() != "" {
+					destinationServiceURL.Host = destinationServiceURL.Hostname()
+				} else {
+					destinationServiceResource = fmt.Sprintf("%s:%d", destinationServiceResource, destPort)
+				}
+			}
+			context.setDestinationService(destinationServiceURL.String(), destinationServiceResource)
 		}
 	}
 	if context.model.Database != nil {
 		span.Type = "db"
 		span.Subtype = context.model.Database.Type
+		if span.Subtype != "" {
+			// For database requests, we currently just identify the
+			// destination service by db.system.
+			context.setDestinationService(span.Subtype, span.Subtype)
+		}
+	}
+	if destAddr != "" {
+		context.setDestinationAddress(destAddr, destPort)
+	}
+	if context.model.Destination != nil && context.model.Destination.Service != nil {
+		context.model.Destination.Service.Type = span.Type
 	}
 	span.Context = context.modelContext()
+	span.Outcome = spanStatusOutcome(otlpSpan.Status())
+	return nil
+}
+
+func encodeSpanEvents(
+	events pdata.SpanEventSlice,
+	resource pdata.Resource,
+	traceID model.TraceID, spanID model.SpanID,
+	w *fastjson.Writer,
+) error {
+	// Translate exception span events to errors.
+	//
+	// TODO(axw) we don't currently support sending arbitrary events
+	// to Elastic APM Server. If/when we do, we should also transmit
+	// otlpSpan.TimeEvents. When there's a convention specified for
+	// error events, we could send those.
+	var language string
+	if v, ok := resource.Attributes().Get(conventions.AttributeTelemetrySDKLanguage); ok {
+		language = v.StringVal()
+	}
+	for i := 0; i < events.Len(); i++ {
+		event := events.At(i)
+		if event.Name() != "exception" {
+			// `The name of the event MUST be "exception"`
+			continue
+		}
+		var exceptionEscaped bool
+		var exceptionMessage, exceptionStacktrace, exceptionType string
+		event.Attributes().ForEach(func(k string, v pdata.AttributeValue) {
+			switch k {
+			case conventions.AttributeExceptionMessage:
+				exceptionMessage = v.StringVal()
+			case conventions.AttributeExceptionStacktrace:
+				exceptionStacktrace = v.StringVal()
+			case conventions.AttributeExceptionType:
+				exceptionType = v.StringVal()
+			case "exception.escaped":
+				exceptionEscaped = v.BoolVal()
+			}
+		})
+		if exceptionMessage == "" && exceptionType == "" {
+			// `At least one of the following sets of attributes is required:
+			// - exception.type
+			// - exception.message`
+			continue
+		}
+		if err := encodeExceptionSpanEvent(
+			time.Unix(0, int64(event.Timestamp())).UTC(),
+			exceptionType, exceptionMessage, exceptionStacktrace,
+			exceptionEscaped, traceID, spanID, language, w,
+		); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -416,16 +515,19 @@ func (c *transactionContext) setHTTPStatusCode(statusCode int) {
 }
 
 type spanContext struct {
-	model   model.SpanContext
-	http    model.HTTPSpanContext
-	httpURL url.URL
-	db      model.DatabaseSpanContext
+	model              model.SpanContext
+	http               model.HTTPSpanContext
+	httpURL            url.URL
+	db                 model.DatabaseSpanContext
+	destination        model.DestinationSpanContext
+	destinationService model.DestinationServiceSpanContext
 }
 
 func (c *spanContext) modelContext() *model.SpanContext {
 	switch {
 	case c.model.HTTP != nil:
 	case c.model.Database != nil:
+	case c.model.Destination != nil:
 	case len(c.model.Tags) != 0:
 	default:
 		return nil
@@ -491,4 +593,38 @@ func (c *spanContext) setDatabaseStatement(dbStatement string) {
 func (c *spanContext) setDatabaseUser(dbUser string) {
 	c.db.User = truncate(dbUser)
 	c.model.Database = &c.db
+}
+
+func (c *spanContext) setDestinationAddress(address string, port int) {
+	c.destination.Address = truncate(address)
+	c.destination.Port = port
+	c.model.Destination = &c.destination
+}
+
+func (c *spanContext) setDestinationService(name, resource string) {
+	c.destinationService.Name = truncate(name)
+	c.destinationService.Resource = truncate(resource)
+	c.destination.Service = &c.destinationService
+	c.model.Destination = &c.destination
+}
+
+func schemeDefaultPort(scheme string) int {
+	switch scheme {
+	case "http":
+		return 80
+	case "https":
+		return 443
+	}
+	return 0
+}
+
+func spanStatusOutcome(status pdata.SpanStatus) string {
+	switch status.Code() {
+	case pdata.StatusCodeOk:
+		return "success"
+	case pdata.StatusCodeError:
+		return "failure"
+	}
+	// Outcome will be set by the server.
+	return ""
 }

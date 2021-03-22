@@ -15,10 +15,11 @@
 package honeycombexporter
 
 import (
+	"context"
+
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config/configerror"
 	"go.opentelemetry.io/collector/config/configmodels"
-	"go.uber.org/zap"
+	"go.opentelemetry.io/collector/exporter/exporterhelper"
 )
 
 const (
@@ -26,37 +27,42 @@ const (
 	typeStr = "honeycomb"
 )
 
-// Factory is the factory for the Honeycomb exporter.
-type Factory struct{}
-
-// Type gets the type of the Exporter config created by this factory.
-func (f *Factory) Type() configmodels.Type {
-	return configmodels.Type(typeStr)
+// NewFactory creates a factory for Honeycomb exporter.
+func NewFactory() component.ExporterFactory {
+	return exporterhelper.NewFactory(
+		typeStr,
+		createDefaultConfig,
+		exporterhelper.WithTraces(createTraceExporter))
 }
 
-// CreateDefaultConfig creates the default configuration for the exporter.
-func (f *Factory) CreateDefaultConfig() configmodels.Exporter {
+func createDefaultConfig() configmodels.Exporter {
 	return &Config{
 		ExporterSettings: configmodels.ExporterSettings{
 			TypeVal: configmodels.Type(typeStr),
 			NameVal: typeStr,
 		},
-		APIKey:     "",
-		Dataset:    "",
-		APIURL:     "https://api.honeycomb.io",
-		SampleRate: 1,
-		Debug:      false,
+		APIKey:              "",
+		Dataset:             "",
+		APIURL:              "https://api.honeycomb.io",
+		SampleRateAttribute: "",
+		Debug:               false,
 	}
 }
 
-// CreateTraceExporter creates a trace exporter based on this config.
-func (f *Factory) CreateTraceExporter(logger *zap.Logger, cfg configmodels.Exporter) (component.TraceExporterOld, error) {
+func createTraceExporter(
+	_ context.Context,
+	params component.ExporterCreateParams,
+	cfg configmodels.Exporter,
+) (component.TracesExporter, error) {
 	eCfg := cfg.(*Config)
-	return newHoneycombTraceExporter(eCfg, logger)
-}
+	exporter, err := newHoneycombTraceExporter(eCfg, params.Logger)
+	if err != nil {
+		return nil, err
+	}
 
-// CreateMetricsExporter always returns nil.
-func (f *Factory) CreateMetricsExporter(logger *zap.Logger,
-	cfg configmodels.Exporter) (component.MetricsExporterOld, error) {
-	return nil, configerror.ErrDataTypeIsNotSupported
+	return exporterhelper.NewTraceExporter(
+		cfg,
+		params.Logger,
+		exporter.pushTraceData,
+		exporterhelper.WithShutdown(exporter.Shutdown))
 }

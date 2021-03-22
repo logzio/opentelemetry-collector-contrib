@@ -15,64 +15,31 @@
 package translator
 
 import (
+	"bytes"
 	"strconv"
 
+	"github.com/aws/aws-sdk-go/aws"
 	"go.opentelemetry.io/collector/consumer/pdata"
 	semconventions "go.opentelemetry.io/collector/translator/conventions"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/awsxray"
 )
 
-// AWS-specific OpenTelemetry attribute names
 const (
-	AWSOperationAttribute = "aws.operation"
-	AWSAccountAttribute   = "aws.account_id"
-	AWSRegionAttribute    = "aws.region"
-	AWSRequestIDAttribute = "aws.request_id"
-	// Currently different instrumentation uses different tag formats.
-	// TODO(anuraaga): Find current instrumentation and consolidate.
-	AWSRequestIDAttribute2 = "aws.requestId"
-	AWSQueueURLAttribute   = "aws.queue_url"
-	AWSQueueURLAttribute2  = "aws.queue.url"
-	AWSServiceAttribute    = "aws.service"
-	AWSTableNameAttribute  = "aws.table_name"
-	AWSTableNameAttribute2 = "aws.table.name"
+	attributeInfrastructureService = "cloud.infrastructure_service"
+	awsEcsClusterArn               = "aws.ecs.cluster.arn"
+	awsEcsContainerArn             = "aws.ecs.container.arn"
+	awsEcsTaskArn                  = "aws.ecs.task.arn"
+	awsEcsTaskFamily               = "aws.ecs.task.family"
+	awsEcsLaunchType               = "aws.ecs.launchtype"
+	awsLogGroupNames               = "aws.log.group.names"
+	awsLogGroupArns                = "aws.log.group.arns"
 )
 
-// AWSData provides the shape for unmarshalling AWS resource data.
-type AWSData struct {
-	AccountID         string             `json:"account_id,omitempty"`
-	BeanstalkMetadata *BeanstalkMetadata `json:"elastic_beanstalk,omitempty"`
-	ECSMetadata       *ECSMetadata       `json:"ecs,omitempty"`
-	EC2Metadata       *EC2Metadata       `json:"ec2,omitempty"`
-	Operation         string             `json:"operation,omitempty"`
-	RemoteRegion      string             `json:"region,omitempty"`
-	RequestID         string             `json:"request_id,omitempty"`
-	QueueURL          string             `json:"queue_url,omitempty"`
-	TableName         string             `json:"table_name,omitempty"`
-}
-
-// EC2Metadata provides the shape for unmarshalling EC2 metadata.
-type EC2Metadata struct {
-	InstanceID       string `json:"instance_id"`
-	AvailabilityZone string `json:"availability_zone"`
-	InstanceSize     string `json:"instance_size"`
-	AmiID            string `json:"ami_id"`
-}
-
-// ECSMetadata provides the shape for unmarshalling ECS metadata.
-type ECSMetadata struct {
-	ContainerName string `json:"container"`
-}
-
-// BeanstalkMetadata provides the shape for unmarshalling Elastic Beanstalk environment metadata.
-type BeanstalkMetadata struct {
-	Environment  string `json:"environment_name"`
-	VersionLabel string `json:"version_label"`
-	DeploymentID int64  `json:"deployment_id"`
-}
-
-func makeAws(attributes map[string]string, resource pdata.Resource) (map[string]string, *AWSData) {
+func makeAws(attributes map[string]string, resource pdata.Resource) (map[string]string, *awsxray.AWSData) {
 	var (
 		cloud        string
+		service      string
 		account      string
 		zone         string
 		hostID       string
@@ -87,108 +54,221 @@ func makeAws(attributes map[string]string, resource pdata.Resource) (map[string]
 		requestID    string
 		queueURL     string
 		tableName    string
-		ec2          *EC2Metadata
-		ecs          *ECSMetadata
-		ebs          *BeanstalkMetadata
+		sdk          string
+		sdkName      string
+		sdkLanguage  string
+		sdkVersion   string
+		autoVersion  string
+		containerID  string
+		clusterName  string
+		podUID       string
+		clusterArn   string
+		containerArn string
+		taskArn      string
+		taskFamily   string
+		launchType   string
+		logGroups    pdata.AnyValueArray
+		logGroupArns pdata.AnyValueArray
+		cwl          []awsxray.LogGroupMetadata
+		ec2          *awsxray.EC2Metadata
+		ecs          *awsxray.ECSMetadata
+		ebs          *awsxray.BeanstalkMetadata
+		eks          *awsxray.EKSMetadata
 	)
 
 	filtered := make(map[string]string)
-	if !resource.IsNil() {
-		resource.Attributes().ForEach(func(key string, value pdata.AttributeValue) {
-			switch key {
-			case semconventions.AttributeCloudProvider:
-				cloud = value.StringVal()
-			case semconventions.AttributeCloudAccount:
-				account = value.StringVal()
-			case semconventions.AttributeCloudZone:
-				zone = value.StringVal()
-			case semconventions.AttributeHostID:
-				hostID = value.StringVal()
-			case semconventions.AttributeHostType:
-				hostType = value.StringVal()
-			case semconventions.AttributeHostImageID:
-				amiID = value.StringVal()
-			case semconventions.AttributeContainerName:
-				if container == "" {
-					container = value.StringVal()
-				}
-			case semconventions.AttributeK8sPod:
+	resource.Attributes().ForEach(func(key string, value pdata.AttributeValue) {
+		switch key {
+		case semconventions.AttributeCloudProvider:
+			cloud = value.StringVal()
+		case attributeInfrastructureService:
+			service = value.StringVal()
+		case semconventions.AttributeCloudAccount:
+			account = value.StringVal()
+		case semconventions.AttributeCloudZone:
+			zone = value.StringVal()
+		case semconventions.AttributeHostID:
+			hostID = value.StringVal()
+		case semconventions.AttributeHostType:
+			hostType = value.StringVal()
+		case semconventions.AttributeHostImageID:
+			amiID = value.StringVal()
+		case semconventions.AttributeContainerName:
+			if container == "" {
 				container = value.StringVal()
-			case semconventions.AttributeServiceNamespace:
-				namespace = value.StringVal()
-			case semconventions.AttributeServiceInstance:
-				deployID = value.StringVal()
-			case semconventions.AttributeServiceVersion:
-				versionLabel = value.StringVal()
 			}
-		})
-	}
+		case semconventions.AttributeK8sPod:
+			podUID = value.StringVal()
+		case semconventions.AttributeServiceNamespace:
+			namespace = value.StringVal()
+		case semconventions.AttributeServiceInstance:
+			deployID = value.StringVal()
+		case semconventions.AttributeServiceVersion:
+			versionLabel = value.StringVal()
+		case semconventions.AttributeTelemetrySDKName:
+			sdkName = value.StringVal()
+		case semconventions.AttributeTelemetrySDKLanguage:
+			sdkLanguage = value.StringVal()
+		case semconventions.AttributeTelemetrySDKVersion:
+			sdkVersion = value.StringVal()
+		case semconventions.AttributeTelemetryAutoVersion:
+			autoVersion = value.StringVal()
+		case semconventions.AttributeContainerID:
+			containerID = value.StringVal()
+		case semconventions.AttributeK8sCluster:
+			clusterName = value.StringVal()
+		case awsEcsClusterArn:
+			clusterArn = value.StringVal()
+		case awsEcsContainerArn:
+			containerArn = value.StringVal()
+		case awsEcsTaskArn:
+			taskArn = value.StringVal()
+		case awsEcsTaskFamily:
+			taskFamily = value.StringVal()
+		case awsEcsLaunchType:
+			launchType = value.StringVal()
+		case awsLogGroupNames:
+			logGroups = value.ArrayVal()
+		case awsLogGroupArns:
+			logGroupArns = value.ArrayVal()
+		}
+	})
 
 	for key, value := range attributes {
 		switch key {
-		case AWSOperationAttribute:
+		case awsxray.AWSOperationAttribute:
 			operation = value
-		case AWSAccountAttribute:
+		case awsxray.AWSAccountAttribute:
 			if value != "" {
 				account = value
 			}
-		case AWSRegionAttribute:
+		case awsxray.AWSRegionAttribute:
 			remoteRegion = value
-		case AWSRequestIDAttribute:
+		case awsxray.AWSRequestIDAttribute:
 			fallthrough
-		case AWSRequestIDAttribute2:
+		case awsxray.AWSRequestIDAttribute2:
 			requestID = value
-		case AWSQueueURLAttribute:
+		case awsxray.AWSQueueURLAttribute:
 			fallthrough
-		case AWSQueueURLAttribute2:
+		case awsxray.AWSQueueURLAttribute2:
 			queueURL = value
-		case AWSTableNameAttribute:
+		case awsxray.AWSTableNameAttribute:
 			fallthrough
-		case AWSTableNameAttribute2:
+		case awsxray.AWSTableNameAttribute2:
 			tableName = value
 		default:
 			filtered[key] = value
 		}
 	}
-	if cloud != "aws" && cloud != "" {
+	if cloud != semconventions.AttributeCloudProviderAWS && cloud != "" {
 		return filtered, nil // not AWS so return nil
 	}
-	// progress from least specific to most specific origin so most specific ends up as origin
-	// as per X-Ray docs
-	if hostID != "" {
-		ec2 = &EC2Metadata{
-			InstanceID:       hostID,
-			AvailabilityZone: zone,
-			InstanceSize:     hostType,
-			AmiID:            amiID,
+
+	if service == "EC2" || hostID != "" {
+		ec2 = &awsxray.EC2Metadata{
+			InstanceID:       awsxray.String(hostID),
+			AvailabilityZone: awsxray.String(zone),
+			InstanceSize:     awsxray.String(hostType),
+			AmiID:            awsxray.String(amiID),
 		}
 	}
-	if container != "" {
-		ecs = &ECSMetadata{
-			ContainerName: container,
+	if service == "ECS" || container != "" {
+		ecs = &awsxray.ECSMetadata{
+			ContainerName:    awsxray.String(container),
+			ContainerID:      awsxray.String(containerID),
+			AvailabilityZone: awsxray.String(zone),
+			ContainerArn:     awsxray.String(containerArn),
+			ClusterArn:       awsxray.String(clusterArn),
+			TaskArn:          awsxray.String(taskArn),
+			TaskFamily:       awsxray.String(taskFamily),
+			LaunchType:       awsxray.String(launchType),
 		}
 	}
+
+	// TODO(willarmiros): Add infrastructure_service checks once their resource detectors are implemented
 	if deployID != "" {
 		deployNum, err := strconv.ParseInt(deployID, 10, 64)
 		if err != nil {
 			deployNum = 0
 		}
-		ebs = &BeanstalkMetadata{
-			Environment:  namespace,
-			DeploymentID: deployNum,
-			VersionLabel: versionLabel,
+		ebs = &awsxray.BeanstalkMetadata{
+			Environment:  awsxray.String(namespace),
+			DeploymentID: aws.Int64(deployNum),
+			VersionLabel: awsxray.String(versionLabel),
 		}
 	}
-	awsData := &AWSData{
-		AccountID:         account,
-		BeanstalkMetadata: ebs,
-		ECSMetadata:       ecs,
-		EC2Metadata:       ec2,
-		Operation:         operation,
-		RemoteRegion:      remoteRegion,
-		RequestID:         requestID,
-		QueueURL:          queueURL,
-		TableName:         tableName,
+	if clusterName != "" {
+		eks = &awsxray.EKSMetadata{
+			ClusterName: awsxray.String(clusterName),
+			Pod:         awsxray.String(podUID),
+			ContainerID: awsxray.String(containerID),
+		}
+	}
+
+	// Since we must couple log group ARNs and Log Group Names in the same CWLogs object, we first try to derive the
+	// names from the ARN, then fall back to just recording the names
+	if logGroupArns != (pdata.AnyValueArray{}) && logGroupArns.Len() > 0 {
+		cwl = getLogGroupMetadata(logGroupArns, true)
+	} else if logGroups != (pdata.AnyValueArray{}) && logGroups.Len() > 0 {
+		cwl = getLogGroupMetadata(logGroups, false)
+	}
+
+	if sdkName != "" && sdkLanguage != "" {
+		// Convention for SDK name for xray SDK information is e.g., `X-Ray SDK for Java`, `X-Ray for Go`.
+		// We fill in with e.g, `opentelemetry for java` by using the conventions
+		sdk = sdkName + " for " + sdkLanguage
+	} else {
+		sdk = sdkName
+	}
+
+	xray := &awsxray.XRayMetaData{
+		SDK:                 awsxray.String(sdk),
+		SDKVersion:          awsxray.String(sdkVersion),
+		AutoInstrumentation: aws.Bool(autoVersion != ""),
+	}
+
+	awsData := &awsxray.AWSData{
+		AccountID:    awsxray.String(account),
+		Beanstalk:    ebs,
+		CWLogs:       cwl,
+		ECS:          ecs,
+		EC2:          ec2,
+		EKS:          eks,
+		XRay:         xray,
+		Operation:    awsxray.String(operation),
+		RemoteRegion: awsxray.String(remoteRegion),
+		RequestID:    awsxray.String(requestID),
+		QueueURL:     awsxray.String(queueURL),
+		TableName:    awsxray.String(tableName),
 	}
 	return filtered, awsData
+}
+
+// Given an array of log group ARNs, create a corresponding amount of LogGroupMetadata objects with log_group and arn
+// populated, or given an array of just log group names, create the LogGroupMetadata objects with arn omitted
+func getLogGroupMetadata(logGroups pdata.AnyValueArray, isArn bool) []awsxray.LogGroupMetadata {
+	var lgm []awsxray.LogGroupMetadata
+	for i := 0; i < logGroups.Len(); i++ {
+		if isArn {
+			lgm = append(lgm, awsxray.LogGroupMetadata{
+				Arn:      awsxray.String(logGroups.At(i).StringVal()),
+				LogGroup: awsxray.String(parseLogGroup(logGroups.At(i).StringVal())),
+			})
+		} else {
+			lgm = append(lgm, awsxray.LogGroupMetadata{
+				LogGroup: awsxray.String(logGroups.At(i).StringVal()),
+			})
+		}
+	}
+
+	return lgm
+}
+
+func parseLogGroup(arn string) string {
+	i := bytes.LastIndexByte([]byte(arn), byte(':'))
+	if i != -1 {
+		return arn[i+1:]
+	}
+
+	return arn
 }

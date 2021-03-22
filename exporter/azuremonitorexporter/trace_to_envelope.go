@@ -17,7 +17,6 @@ package azuremonitorexporter
 // Contains code common to both trace and metrics exporters
 import (
 	"errors"
-	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
@@ -27,7 +26,6 @@ import (
 	"go.opentelemetry.io/collector/consumer/pdata"
 	"go.opentelemetry.io/collector/translator/conventions"
 	"go.uber.org/zap"
-	"google.golang.org/grpc/codes"
 )
 
 const (
@@ -43,7 +41,6 @@ const (
 )
 
 var (
-	errUnspecifiedSpanKind          = errors.New("SpanKind is unspecified")
 	errUnexpectedAttributeValueType = errors.New("attribute value type is unexpected")
 	errUnsupportedSpanType          = errors.New("unsupported Span type")
 )
@@ -61,9 +58,10 @@ func spanToEnvelope(
 
 	spanKind := span.Kind()
 
-	// unspecified, drop it
+	// According to the SpanKind documentation, we can assume it to be INTERNAL
+	// when we get UNSPECIFIED.
 	if spanKind == pdata.SpanKindUNSPECIFIED {
-		return nil, errUnspecifiedSpanKind
+		spanKind = pdata.SpanKindINTERNAL
 	}
 
 	attributeMap := span.Attributes()
@@ -77,9 +75,8 @@ func spanToEnvelope(
 	envelope := contracts.NewEnvelope()
 	envelope.Tags = make(map[string]string)
 	envelope.Time = toTime(span.StartTime()).Format(time.RFC3339Nano)
-	traceIDHexString := idToHex(span.TraceID())
-	envelope.Tags[contracts.OperationId] = traceIDHexString
-	envelope.Tags[contracts.OperationParentId] = idToHex(span.ParentSpanID())
+	envelope.Tags[contracts.OperationId] = span.TraceID().HexString()
+	envelope.Tags[contracts.OperationParentId] = span.ParentSpanID().HexString()
 
 	data := contracts.NewData()
 	var dataSanitizeFunc func() []string
@@ -108,6 +105,14 @@ func spanToEnvelope(
 		data.BaseType = remoteDependencyData.BaseType()
 	}
 
+	// Record the raw Span status values as properties
+	dataProperties[attributeOtelStatusCode] = span.Status().Code().String()
+	dataProperties[attributeOtelStatusDeprecatedCode] = span.Status().DeprecatedCode().String()
+	statusMessage := span.Status().Message()
+	if len(statusMessage) > 0 {
+		dataProperties[attributeOtelStatusDescription] = statusMessage
+	}
+
 	envelope.Data = data
 	resourceAttributes := resource.Attributes()
 
@@ -115,14 +120,12 @@ func spanToEnvelope(
 	resourceAttributes.ForEach(func(k string, v pdata.AttributeValue) { dataProperties[k] = v.StringVal() })
 
 	// Copy the instrumentation properties
-	if !instrumentationLibrary.IsNil() {
-		if instrumentationLibrary.Name() != "" {
-			dataProperties[instrumentationLibraryName] = instrumentationLibrary.Name()
-		}
+	if instrumentationLibrary.Name() != "" {
+		dataProperties[instrumentationLibraryName] = instrumentationLibrary.Name()
+	}
 
-		if instrumentationLibrary.Version() != "" {
-			dataProperties[instrumentationLibraryVersion] = instrumentationLibrary.Version()
-		}
+	if instrumentationLibrary.Version() != "" {
+		dataProperties[instrumentationLibraryVersion] = instrumentationLibrary.Version()
 	}
 
 	// Extract key service.* labels from the Resource labels and construct CloudRole and CloudRoleInstance envelope tags
@@ -154,7 +157,7 @@ func spanToRequestData(span pdata.Span, incomingSpanType spanType) *contracts.Re
 	// See https://github.com/microsoft/ApplicationInsights-Go/blob/master/appinsights/contracts/requestdata.go
 	// Start with some reasonable default for server spans.
 	data := contracts.NewRequestData()
-	data.Id = idToHex(span.SpanID())
+	data.Id = span.SpanID().HexString()
 	data.Name = span.Name()
 	data.Duration = formatSpanDuration(span)
 	data.Properties = make(map[string]string)
@@ -180,7 +183,7 @@ func spanToRemoteDependencyData(span pdata.Span, incomingSpanType spanType) *con
 	// https://github.com/microsoft/ApplicationInsights-Go/blob/master/appinsights/contracts/remotedependencydata.go
 	// Start with some reasonable default for dependent spans.
 	data := contracts.NewRemoteDependencyData()
-	data.Id = idToHex(span.SpanID())
+	data.Id = span.SpanID().HexString()
 	data.Name = span.Name()
 	data.ResultCode, data.Success = getDefaultFormattedSpanStatus(span.Status())
 	data.Duration = formatSpanDuration(span)
@@ -386,6 +389,8 @@ func fillRemoteDependencyDataHTTP(span pdata.Span, data *contracts.RemoteDepende
 func fillRequestDataRPC(span pdata.Span, data *contracts.RequestData) {
 	attrs := copyAndExtractRPCAttributes(span.Attributes(), data.Properties, data.Measurements)
 
+	data.ResponseCode = getRPCStatusCodeAsString(span, attrs)
+
 	var sb strings.Builder
 
 	sb.WriteString(attrs.RPCSystem)
@@ -410,6 +415,8 @@ func fillRequestDataRPC(span pdata.Span, data *contracts.RequestData) {
 func fillRemoteDependencyDataRPC(span pdata.Span, data *contracts.RemoteDependencyData) {
 	attrs := copyAndExtractRPCAttributes(span.Attributes(), data.Properties, data.Measurements)
 
+	data.ResultCode = getRPCStatusCodeAsString(span, attrs)
+
 	// Set the .Data property to .Name which contain the full RPC method
 	data.Data = data.Name
 
@@ -418,6 +425,19 @@ func fillRemoteDependencyDataRPC(span pdata.Span, data *contracts.RemoteDependen
 	var sb strings.Builder
 	writeFormattedPeerAddressFromNetworkAttributes(&attrs.NetworkAttributes, &sb)
 	data.Target = sb.String()
+}
+
+// Returns the RPC status code as a string
+func getRPCStatusCodeAsString(span pdata.Span, rpcAttributes *RPCAttributes) (statusCodeAsString string) {
+	// Honor the attribute rpc.grpc.status_code if there
+	if rpcAttributes.RPCGRPCStatusCode != 0 {
+		return strconv.FormatInt(rpcAttributes.RPCGRPCStatusCode, 10)
+	}
+
+	// Backwards compatibility with old senders.
+	// We lose the gRPC status code otherwise
+	deprecatedCode := span.Status().DeprecatedCode()
+	return strconv.FormatInt(int64(deprecatedCode), 10)
 }
 
 // Maps Database Client Span to AppInsights RemoteDependencyData
@@ -561,14 +581,6 @@ func copyAndExtractMessagingAttributes(
 	return attrs
 }
 
-func idToHex(source []byte) string {
-	if source == nil {
-		return ""
-	}
-
-	return fmt.Sprintf("%02x", source)
-}
-
 func formatSpanDuration(span pdata.Span) string {
 	startTime := toTime(span.StartTime())
 	endTime := toTime(span.EndTime())
@@ -582,18 +594,18 @@ func mapIncomingSpanToType(attributeMap pdata.AttributeMap) spanType {
 		return unknownSpanType
 	}
 
-	// HTTP
-	if _, exists := attributeMap.Get(conventions.AttributeHTTPMethod); exists {
-		return httpSpanType
-	}
-
 	// RPC
 	if _, exists := attributeMap.Get(conventions.AttributeRPCSystem); exists {
 		return rpcSpanType
 	}
 
+	// HTTP
+	if _, exists := attributeMap.Get(conventions.AttributeHTTPMethod); exists {
+		return httpSpanType
+	}
+
 	// Database
-	if _, exists := attributeMap.Get(attributeDBSystem); exists {
+	if _, exists := attributeMap.Get(conventions.AttributeDBSystem); exists {
 		return databaseSpanType
 	}
 
@@ -609,15 +621,35 @@ func mapIncomingSpanToType(attributeMap pdata.AttributeMap) spanType {
 	return unknownSpanType
 }
 
-// map to the standard gRPC status codes if specified, otherwise default to 0 - OK
-// https://github.com/open-telemetry/opentelemetry-specification/blob/master/specification/trace/api.md#status
+// https://github.com/open-telemetry/opentelemetry-specification/blob/master/specification/trace/api.md#set-status
 func getDefaultFormattedSpanStatus(spanStatus pdata.SpanStatus) (statusCodeAsString string, success bool) {
-	if spanStatus.IsNil() {
-		return "0", true
+	// For a description of backwards compatibility requirements for Status see
+	// https://github.com/open-telemetry/opentelemetry-proto/blob/master/opentelemetry/proto/trace/v1/trace.proto
+	//
+	// Specifically:
+	// 3. New receivers MUST look at both the `code` and `deprecated_code` fields in order
+	// to interpret the overall status:
+	//
+	//   If code==STATUS_CODE_UNSET then the value of `deprecated_code` is the
+	//   carrier of the overall status according to these rules:
+	//
+	//     if deprecated_code==DEPRECATED_STATUS_CODE_OK then the receiver MUST interpret
+	//     the overall status to be STATUS_CODE_UNSET.
+	//
+	//     if deprecated_code!=DEPRECATED_STATUS_CODE_OK then the receiver MUST interpret
+	//     the overall status to be STATUS_CODE_ERROR.
+	//
+	//   If code!=STATUS_CODE_UNSET then the value of `deprecated_code` MUST be
+	//   ignored, the `code` field is the sole carrier of the status.
+	code := spanStatus.Code()
+
+	if code == pdata.StatusCodeUnset {
+		if spanStatus.DeprecatedCode() != pdata.DeprecatedStatusCodeOk {
+			code = pdata.StatusCodeError
+		}
 	}
 
-	statusCode := int32(spanStatus.Code())
-	return strconv.FormatInt(int64(statusCode), 10), statusCode == int32(codes.OK)
+	return strconv.FormatInt(int64(code), 10), code != pdata.StatusCodeError
 }
 
 func writeFormattedPeerAddressFromNetworkAttributes(networkAttributes *NetworkAttributes, sb *strings.Builder) {
@@ -651,7 +683,7 @@ func setAttributeValueAsPropertyOrMeasurement(
 		measurements[key] = float64(attributeValue.IntVal())
 
 	case pdata.AttributeValueDOUBLE:
-		measurements[key] = float64(attributeValue.DoubleVal())
+		measurements[key] = attributeValue.DoubleVal()
 	}
 }
 

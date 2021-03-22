@@ -16,7 +16,7 @@ package metricstransformprocessor
 
 import (
 	metricspb "github.com/census-instrumentation/opencensus-proto/gen-go/metrics/v1"
-	timestamp "github.com/golang/protobuf/ptypes/timestamp"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type builder struct {
@@ -52,7 +52,7 @@ func (b builder) setLabels(labels []string) builder {
 }
 
 // addTimeseries adds new timeseries with the labelValuesVal and startTimestamp
-func (b builder) addTimeseries(startTimestamp int64, labelValuesVal []string) builder {
+func (b builder) addTimeseries(startTimestampSeconds int64, labelValuesVal []string) builder {
 	labelValues := make([]*metricspb.LabelValue, len(labelValuesVal))
 	for i, v := range labelValuesVal {
 		labelValues[i] = &metricspb.LabelValue{
@@ -60,13 +60,16 @@ func (b builder) addTimeseries(startTimestamp int64, labelValuesVal []string) bu
 			HasValue: true,
 		}
 	}
+
+	var startTimestamp *timestamppb.Timestamp
+	if startTimestampSeconds != 0 {
+		startTimestamp = &timestamppb.Timestamp{Seconds: startTimestampSeconds}
+	}
+
 	timeseries := &metricspb.TimeSeries{
-		StartTimestamp: &timestamp.Timestamp{
-			Seconds: startTimestamp,
-			Nanos:   0,
-		},
-		LabelValues: labelValues,
-		Points:      make([]*metricspb.Point, 0),
+		StartTimestamp: startTimestamp,
+		LabelValues:    labelValues,
+		Points:         nil,
 	}
 	b.metric.Timeseries = append(b.metric.Timeseries, timeseries)
 	return b
@@ -78,10 +81,16 @@ func (b builder) setDataType(dataType metricspb.MetricDescriptor_Type) builder {
 	return b
 }
 
+// setUnit sets the unit of this metric
+func (b builder) setUnit(unit string) builder {
+	b.metric.MetricDescriptor.Unit = unit
+	return b
+}
+
 // addInt64Point adds a int64 point to the tidx-th timseries
 func (b builder) addInt64Point(tidx int, val int64, timestampVal int64) builder {
 	point := &metricspb.Point{
-		Timestamp: &timestamp.Timestamp{
+		Timestamp: &timestamppb.Timestamp{
 			Seconds: timestampVal,
 			Nanos:   0,
 		},
@@ -97,7 +106,7 @@ func (b builder) addInt64Point(tidx int, val int64, timestampVal int64) builder 
 // addDoublePoint adds a double point to the tidx-th timseries
 func (b builder) addDoublePoint(tidx int, val float64, timestampVal int64) builder {
 	point := &metricspb.Point{
-		Timestamp: &timestamp.Timestamp{
+		Timestamp: &timestamppb.Timestamp{
 			Seconds: timestampVal,
 			Nanos:   0,
 		},
@@ -111,7 +120,7 @@ func (b builder) addDoublePoint(tidx int, val float64, timestampVal int64) build
 }
 
 // addDistributionPoints adds a distribution point to the tidx-th timseries
-func (b builder) addDistributionPoints(tidx int, timestampVal int64, count int64, sum float64, bounds []float64, bucketsVal []int64, sumOfSquaredDeviation float64) builder {
+func (b builder) addDistributionPoints(tidx int, count int64, sum float64, bounds []float64, bucketsVal []int64) builder {
 	buckets := make([]*metricspb.DistributionValue_Bucket, len(bucketsVal))
 	for buIdx, bucket := range bucketsVal {
 		buckets[buIdx] = &metricspb.DistributionValue_Bucket{
@@ -119,8 +128,8 @@ func (b builder) addDistributionPoints(tidx int, timestampVal int64, count int64
 		}
 	}
 	point := &metricspb.Point{
-		Timestamp: &timestamp.Timestamp{
-			Seconds: timestampVal,
+		Timestamp: &timestamppb.Timestamp{
+			Seconds: 1,
 			Nanos:   0,
 		},
 		Value: &metricspb.Point_DistributionValue{
@@ -132,10 +141,9 @@ func (b builder) addDistributionPoints(tidx int, timestampVal int64, count int64
 						},
 					},
 				},
-				Count:                 count,
-				Sum:                   sum,
-				Buckets:               buckets,
-				SumOfSquaredDeviation: sumOfSquaredDeviation,
+				Count:   count,
+				Sum:     sum,
+				Buckets: buckets,
 			},
 		},
 	}

@@ -35,7 +35,7 @@ func TestTraceExport(t *testing.T) {
 	ctx := context.Background()
 	td := constructSpanData()
 	err := traceExporter.ConsumeTraces(ctx, td)
-	assert.Nil(t, err)
+	assert.NotNil(t, err)
 }
 
 func BenchmarkForTraceExporter(b *testing.B) {
@@ -49,7 +49,7 @@ func BenchmarkForTraceExporter(b *testing.B) {
 	}
 }
 
-func initializeTraceExporter() component.TraceExporter {
+func initializeTraceExporter() component.TracesExporter {
 	os.Setenv("AWS_ACCESS_KEY_ID", "AKIASSWVJUY4PZXXXXXX")
 	os.Setenv("AWS_SECRET_ACCESS_KEY", "XYrudg2H87u+ADAAq19Wqx3D41a09RsTXXXXXXXX")
 	os.Setenv("AWS_DEFAULT_REGION", "us-east-1")
@@ -61,7 +61,7 @@ func initializeTraceExporter() component.TraceExporter {
 	config.(*Config).LocalMode = true
 	mconn := new(mockConn)
 	mconn.sn, _ = getDefaultSession(logger)
-	traceExporter, err := NewTraceExporter(config, logger, mconn)
+	traceExporter, err := newTraceExporter(config, component.ExporterCreateParams{Logger: logger}, mconn)
 	if err != nil {
 		panic(err)
 	}
@@ -85,13 +85,12 @@ func constructSpanData() pdata.Traces {
 
 func constructResource() pdata.Resource {
 	resource := pdata.NewResource()
-	resource.InitEmpty()
 	attrs := pdata.NewAttributeMap()
 	attrs.InsertString(semconventions.AttributeServiceName, "signup_aggregator")
 	attrs.InsertString(semconventions.AttributeContainerName, "signup_aggregator")
 	attrs.InsertString(semconventions.AttributeContainerImage, "otel/signupaggregator")
 	attrs.InsertString(semconventions.AttributeContainerTag, "v1")
-	attrs.InsertString(semconventions.AttributeCloudProvider, "aws")
+	attrs.InsertString(semconventions.AttributeCloudProvider, semconventions.AttributeCloudProviderAWS)
 	attrs.InsertString(semconventions.AttributeCloudAccount, "999999998")
 	attrs.InsertString(semconventions.AttributeCloudRegion, "us-west-2")
 	attrs.InsertString(semconventions.AttributeCloudZone, "us-west-1b")
@@ -110,7 +109,6 @@ func constructHTTPClientSpan() pdata.Span {
 	spanAttributes := constructSpanAttributes(attributes)
 
 	span := pdata.NewSpan()
-	span.InitEmpty()
 	span.SetTraceID(newTraceID())
 	span.SetSpanID(newSegmentID())
 	span.SetParentSpanID(newSegmentID())
@@ -120,7 +118,6 @@ func constructHTTPClientSpan() pdata.Span {
 	span.SetEndTime(pdata.TimestampUnixNano(endTime.UnixNano()))
 
 	status := pdata.NewSpanStatus()
-	status.InitEmpty()
 	status.SetCode(0)
 	status.SetMessage("OK")
 	status.CopyTo(span.Status())
@@ -141,7 +138,6 @@ func constructHTTPServerSpan() pdata.Span {
 	spanAttributes := constructSpanAttributes(attributes)
 
 	span := pdata.NewSpan()
-	span.InitEmpty()
 	span.SetTraceID(newTraceID())
 	span.SetSpanID(newSegmentID())
 	span.SetParentSpanID(newSegmentID())
@@ -151,7 +147,6 @@ func constructHTTPServerSpan() pdata.Span {
 	span.SetEndTime(pdata.TimestampUnixNano(endTime.UnixNano()))
 
 	status := pdata.NewSpanStatus()
-	status.InitEmpty()
 	status.SetCode(0)
 	status.SetMessage("OK")
 	status.CopyTo(span.Status())
@@ -174,7 +169,7 @@ func constructSpanAttributes(attributes map[string]interface{}) pdata.AttributeM
 	return attrs
 }
 
-func newTraceID() []byte {
+func newTraceID() pdata.TraceID {
 	var r [16]byte
 	epoch := time.Now().Unix()
 	binary.BigEndian.PutUint32(r[0:4], uint32(epoch))
@@ -182,14 +177,14 @@ func newTraceID() []byte {
 	if err != nil {
 		panic(err)
 	}
-	return r[:]
+	return pdata.NewTraceID(r)
 }
 
-func newSegmentID() []byte {
+func newSegmentID() pdata.SpanID {
 	var r [8]byte
 	_, err := rand.Read(r[:])
 	if err != nil {
 		panic(err)
 	}
-	return r[:]
+	return pdata.NewSpanID(r)
 }

@@ -32,12 +32,12 @@ func TestMetric10kDPS(t *testing.T) {
 		resourceSpec testbed.ResourceSpec
 	}{
 		{
-			"OpenCensus",
-			testbed.NewOCMetricDataSender(testbed.DefaultHost, testbed.GetAvailablePort(t)),
-			testbed.NewOCDataReceiver(testbed.GetAvailablePort(t)),
+			"OTLP",
+			testbed.NewOTLPMetricDataSender(testbed.DefaultHost, testbed.GetAvailablePort(t)),
+			testbed.NewOTLPDataReceiver(testbed.GetAvailablePort(t)),
 			testbed.ResourceSpec{
-				ExpectedMaxCPU: 70,
-				ExpectedMaxRAM: 70,
+				ExpectedMaxCPU: 50,
+				ExpectedMaxRAM: 80,
 			},
 		},
 		{
@@ -54,7 +54,7 @@ func TestMetric10kDPS(t *testing.T) {
 			datasenders.NewSFxMetricDataSender(testbed.GetAvailablePort(t)),
 			datareceivers.NewSFxMetricsDataReceiver(testbed.GetAvailablePort(t)),
 			testbed.ResourceSpec{
-				ExpectedMaxCPU: 83,
+				ExpectedMaxCPU: 120,
 				ExpectedMaxRAM: 91,
 			},
 		},
@@ -68,6 +68,7 @@ func TestMetric10kDPS(t *testing.T) {
 				test.receiver,
 				test.resourceSpec,
 				contribPerfResultsSummary,
+				nil,
 				nil,
 			)
 		})

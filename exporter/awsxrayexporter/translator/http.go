@@ -17,36 +17,20 @@ package translator
 import (
 	"strconv"
 
+	"github.com/aws/aws-sdk-go/aws"
 	"go.opentelemetry.io/collector/consumer/pdata"
 	semconventions "go.opentelemetry.io/collector/translator/conventions"
 	tracetranslator "go.opentelemetry.io/collector/translator/trace"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/awsxray"
 )
 
-// HTTPData provides the shape for unmarshalling request and response data.
-type HTTPData struct {
-	Request  RequestData  `json:"request,omitempty"`
-	Response ResponseData `json:"response,omitempty"`
-}
-
-// RequestData provides the shape for unmarshalling request data.
-type RequestData struct {
-	Method        string `json:"method,omitempty"`
-	URL           string `json:"url,omitempty"` // http(s)://host/path
-	ClientIP      string `json:"client_ip,omitempty"`
-	UserAgent     string `json:"user_agent,omitempty"`
-	XForwardedFor bool   `json:"x_forwarded_for,omitempty"`
-	Traced        bool   `json:"traced,omitempty"`
-}
-
-// ResponseData provides the shape for unmarshalling response data.
-type ResponseData struct {
-	Status        int64 `json:"status,omitempty"`
-	ContentLength int64 `json:"content_length,omitempty"`
-}
-
-func makeHTTP(span pdata.Span) (map[string]string, *HTTPData) {
+func makeHTTP(span pdata.Span) (map[string]string, *awsxray.HTTPData) {
 	var (
-		info     HTTPData
+		info = awsxray.HTTPData{
+			Request:  &awsxray.RequestData{},
+			Response: &awsxray.ResponseData{},
+		}
 		filtered = make(map[string]string)
 		urlParts = make(map[string]string)
 	)
@@ -56,37 +40,41 @@ func makeHTTP(span pdata.Span) (map[string]string, *HTTPData) {
 	}
 
 	hasHTTP := false
+	hasHTTPRequestURLAttributes := false
 
 	span.Attributes().ForEach(func(key string, value pdata.AttributeValue) {
 		switch key {
 		case semconventions.AttributeHTTPMethod:
-			info.Request.Method = value.StringVal()
+			info.Request.Method = awsxray.String(value.StringVal())
 			hasHTTP = true
 		case semconventions.AttributeHTTPClientIP:
-			info.Request.ClientIP = value.StringVal()
-			info.Request.XForwardedFor = true
+			info.Request.ClientIP = awsxray.String(value.StringVal())
+			info.Request.XForwardedFor = aws.Bool(true)
 			hasHTTP = true
 		case semconventions.AttributeHTTPUserAgent:
-			info.Request.UserAgent = value.StringVal()
+			info.Request.UserAgent = awsxray.String(value.StringVal())
 			hasHTTP = true
 		case semconventions.AttributeHTTPStatusCode:
-			info.Response.Status = value.IntVal()
+			info.Response.Status = aws.Int64(value.IntVal())
 			hasHTTP = true
 		case semconventions.AttributeHTTPURL:
 			urlParts[key] = value.StringVal()
 			hasHTTP = true
+			hasHTTPRequestURLAttributes = true
 		case semconventions.AttributeHTTPScheme:
 			urlParts[key] = value.StringVal()
 			hasHTTP = true
 		case semconventions.AttributeHTTPHost:
 			urlParts[key] = value.StringVal()
 			hasHTTP = true
+			hasHTTPRequestURLAttributes = true
 		case semconventions.AttributeHTTPTarget:
 			urlParts[key] = value.StringVal()
 			hasHTTP = true
 		case semconventions.AttributeHTTPServerName:
 			urlParts[key] = value.StringVal()
 			hasHTTP = true
+			hasHTTPRequestURLAttributes = true
 		case semconventions.AttributeHTTPHostPort:
 			urlParts[key] = value.StringVal()
 			hasHTTP = true
@@ -95,6 +83,10 @@ func makeHTTP(span pdata.Span) (map[string]string, *HTTPData) {
 			}
 		case semconventions.AttributeHostName:
 			urlParts[key] = value.StringVal()
+			hasHTTPRequestURLAttributes = true
+		case semconventions.AttributeNetHostName:
+			urlParts[key] = value.StringVal()
+			hasHTTPRequestURLAttributes = true
 		case semconventions.AttributeNetPeerName:
 			urlParts[key] = value.StringVal()
 		case semconventions.AttributeNetPeerPort:
@@ -104,10 +96,11 @@ func makeHTTP(span pdata.Span) (map[string]string, *HTTPData) {
 			}
 		case semconventions.AttributeNetPeerIP:
 			// Prefer HTTP forwarded information (AttributeHTTPClientIP) when present.
-			if info.Request.ClientIP == "" {
-				info.Request.ClientIP = value.StringVal()
+			if info.Request.ClientIP == nil {
+				info.Request.ClientIP = awsxray.String(value.StringVal())
 			}
 			urlParts[key] = value.StringVal()
+			hasHTTPRequestURLAttributes = true
 		default:
 			filtered[key] = value.StringVal()
 		}
@@ -118,18 +111,20 @@ func makeHTTP(span pdata.Span) (map[string]string, *HTTPData) {
 		return filtered, nil
 	}
 
-	if span.Kind() == pdata.SpanKindSERVER {
-		info.Request.URL = constructServerURL(urlParts)
-	} else {
-		info.Request.URL = constructClientURL(urlParts)
+	if hasHTTPRequestURLAttributes {
+		if span.Kind() == pdata.SpanKindSERVER {
+			info.Request.URL = awsxray.String(constructServerURL(urlParts))
+		} else {
+			info.Request.URL = awsxray.String(constructClientURL(urlParts))
+		}
 	}
 
-	if !span.Status().IsNil() && info.Response.Status == 0 {
+	if info.Response.Status == nil {
 		// TODO(anuraaga): Replace with direct translator of StatusCode without casting to int
-		info.Response.Status = int64(tracetranslator.HTTPStatusCodeFromOCStatus(int32(span.Status().Code())))
+		info.Response.Status = aws.Int64(int64(tracetranslator.HTTPStatusCodeFromOCStatus(int32(span.Status().Code()))))
 	}
 
-	info.Response.ContentLength = extractResponseSizeFromEvents(span)
+	info.Response.ContentLength = aws.Int64(extractResponseSizeFromEvents(span))
 
 	return filtered, &info
 }
@@ -162,7 +157,8 @@ func extractResponseSizeFromAttributes(attributes pdata.AttributeMap) int64 {
 
 func constructClientURL(urlParts map[string]string) string {
 	// follows OpenTelemetry specification-defined combinations for client spans described in
-	// https://github.com/open-telemetry/opentelemetry-specification/blob/master/specification/data-http.md
+	// https://github.com/open-telemetry/opentelemetry-specification/blob/master/specification/trace/semantic_conventions/http.md#http-client
+
 	url, ok := urlParts[semconventions.AttributeHTTPURL]
 	if ok {
 		// full URL available so no need to assemble
@@ -200,7 +196,8 @@ func constructClientURL(urlParts map[string]string) string {
 
 func constructServerURL(urlParts map[string]string) string {
 	// follows OpenTelemetry specification-defined combinations for server spans described in
-	// https://github.com/open-telemetry/opentelemetry-specification/blob/master/specification/data-http.md
+	// https://github.com/open-telemetry/opentelemetry-specification/blob/master/specification/trace/semantic_conventions/http.md#http-server-semantic-conventions
+
 	url, ok := urlParts[semconventions.AttributeHTTPURL]
 	if ok {
 		// full URL available so no need to assemble
@@ -216,7 +213,10 @@ func constructServerURL(urlParts map[string]string) string {
 	if !ok {
 		host, ok = urlParts[semconventions.AttributeHTTPServerName]
 		if !ok {
-			host = urlParts[semconventions.AttributeHostName]
+			host, ok = urlParts[semconventions.AttributeNetHostName]
+			if !ok {
+				host = urlParts[semconventions.AttributeHostName]
+			}
 		}
 		port, ok = urlParts[semconventions.AttributeHTTPHostPort]
 		if !ok {

@@ -38,8 +38,8 @@ type observerHandler struct {
 	runner runner
 }
 
-// Shutdown all receivers started at runtime.
-func (obs *observerHandler) Shutdown() error {
+// shutdown all receivers started at runtime.
+func (obs *observerHandler) shutdown() error {
 	obs.Lock()
 	defer obs.Unlock()
 
@@ -66,7 +66,7 @@ func (obs *observerHandler) OnAdd(added []observer.Endpoint) {
 	defer obs.Unlock()
 
 	for _, e := range added {
-		env, err := observer.EndpointToEnv(e)
+		env, err := e.Env()
 		if err != nil {
 			obs.logger.Error("unable to convert endpoint to environment map", zap.String("endpoint", string(e.ID)), zap.Error(err))
 			continue

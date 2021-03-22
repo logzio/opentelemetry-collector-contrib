@@ -16,22 +16,19 @@
 package stackdriverexporter
 
 import (
-	"errors"
+	"context"
 	"time"
 
 	"go.opentelemetry.io/collector/consumer/pdata"
-	"go.opentelemetry.io/otel/api/kv"
-	"go.opentelemetry.io/otel/api/kv/value"
-	apitrace "go.opentelemetry.io/otel/api/trace"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/label"
 	export "go.opentelemetry.io/otel/sdk/export/trace"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
 	sdkresource "go.opentelemetry.io/otel/sdk/resource"
-	"google.golang.org/grpc/codes"
+	apitrace "go.opentelemetry.io/otel/trace"
 )
 
-var errNilSpan = errors.New("expected a non-nil span")
-
-func pdataResourceSpansToOTSpanData(rs pdata.ResourceSpans) ([]*export.SpanData, error) {
+func pdataResourceSpansToOTSpanData(rs pdata.ResourceSpans) []*export.SpanData {
 	resource := rs.Resource()
 	var sds []*export.SpanData
 	ilss := rs.InstrumentationLibrarySpans()
@@ -39,39 +36,33 @@ func pdataResourceSpansToOTSpanData(rs pdata.ResourceSpans) ([]*export.SpanData,
 		ils := ilss.At(i)
 		spans := ils.Spans()
 		for j := 0; j < spans.Len(); j++ {
-			sd, err := pdataSpanToOTSpanData(spans.At(j), resource, ils.InstrumentationLibrary())
-			if err != nil {
-				return nil, err
-			}
+			sd := pdataSpanToOTSpanData(spans.At(j), resource, ils.InstrumentationLibrary())
 			sds = append(sds, sd)
 		}
 	}
 
-	return sds, nil
+	return sds
 }
 
 func pdataSpanToOTSpanData(
 	span pdata.Span,
 	resource pdata.Resource,
 	il pdata.InstrumentationLibrary,
-) (*export.SpanData, error) {
-	if span.IsNil() {
-		return nil, errNilSpan
-	}
+) *export.SpanData {
 	sc := apitrace.SpanContext{}
-	copy(sc.TraceID[:], span.TraceID())
-	copy(sc.SpanID[:], span.SpanID())
-	var parentSpanID apitrace.SpanID
-	copy(parentSpanID[:], span.ParentSpanID())
+	sc.TraceID = span.TraceID().Bytes()
+	sc.SpanID = span.SpanID().Bytes()
 	startTime := time.Unix(0, int64(span.StartTime()))
 	endTime := time.Unix(0, int64(span.EndTime()))
-	r := sdkresource.New(
-		pdataAttributesToOTAttributes(pdata.NewAttributeMap(), resource)...,
+	// TODO: Decide if ignoring the error is fine.
+	r, _ := sdkresource.New(
+		context.Background(),
+		sdkresource.WithAttributes(pdataAttributesToOTAttributes(pdata.NewAttributeMap(), resource)...),
 	)
 
 	sd := &export.SpanData{
 		SpanContext:              sc,
-		ParentSpanID:             parentSpanID,
+		ParentSpanID:             span.ParentSpanID().Bytes(),
 		SpanKind:                 pdataSpanKindToOTSpanKind(span.Kind()),
 		StartTime:                startTime,
 		EndTime:                  endTime,
@@ -85,18 +76,15 @@ func pdataSpanToOTSpanData(
 		DroppedLinkCount:         int(span.DroppedLinksCount()),
 		Resource:                 r,
 	}
-	if !il.IsNil() {
-		sd.InstrumentationLibrary = instrumentation.Library{
-			Name:    il.Name(),
-			Version: il.Version(),
-		}
+	sd.InstrumentationLibrary = instrumentation.Library{
+		Name:    il.Name(),
+		Version: il.Version(),
 	}
-	if status := span.Status(); !status.IsNil() {
-		sd.StatusCode = pdataStatusCodeToGRPCCode(status.Code())
-		sd.StatusMessage = status.Message()
-	}
+	status := span.Status()
+	sd.StatusCode = pdataStatusCodeToOTCode(status.Code())
+	sd.StatusMessage = status.Message()
 
-	return sd, nil
+	return sd
 }
 
 func pdataSpanKindToOTSpanKind(k pdata.SpanKind) apitrace.SpanKind {
@@ -118,35 +106,37 @@ func pdataSpanKindToOTSpanKind(k pdata.SpanKind) apitrace.SpanKind {
 	}
 }
 
-func pdataStatusCodeToGRPCCode(c pdata.StatusCode) codes.Code {
-	return codes.Code(c)
+func pdataStatusCodeToOTCode(c pdata.StatusCode) codes.Code {
+	switch c {
+	case pdata.StatusCodeOk:
+		return codes.Ok
+	case pdata.StatusCodeError:
+		return codes.Error
+	default:
+		return codes.Unset
+	}
 }
 
-func pdataAttributesToOTAttributes(attrs pdata.AttributeMap, resource pdata.Resource) []kv.KeyValue {
-	otAttrs := make([]kv.KeyValue, 0, attrs.Len())
+func pdataAttributesToOTAttributes(attrs pdata.AttributeMap, resource pdata.Resource) []label.KeyValue {
+	otAttrs := make([]label.KeyValue, 0, attrs.Len())
 	appendAttrs := func(m pdata.AttributeMap) {
 		m.ForEach(func(k string, v pdata.AttributeValue) {
-			var newVal value.Value
 			switch v.Type() {
 			case pdata.AttributeValueSTRING:
-				newVal = value.String(v.StringVal())
+				otAttrs = append(otAttrs, label.String(k, v.StringVal()))
 			case pdata.AttributeValueBOOL:
-				newVal = value.Bool(v.BoolVal())
+				otAttrs = append(otAttrs, label.Bool(k, v.BoolVal()))
 			case pdata.AttributeValueINT:
-				newVal = value.Int64(v.IntVal())
-			// pdata Double, Array, and Map cannot be converted to value.Value
+				otAttrs = append(otAttrs, label.Int64(k, v.IntVal()))
+			case pdata.AttributeValueDOUBLE:
+				otAttrs = append(otAttrs, label.Float64(k, v.DoubleVal()))
+			// pdata Array, and Map cannot be converted to value.Value
 			default:
 				return
 			}
-			otAttrs = append(otAttrs, kv.KeyValue{
-				Key:   kv.Key(k),
-				Value: newVal,
-			})
 		})
 	}
-	if !resource.IsNil() {
-		appendAttrs(resource.Attributes())
-	}
+	appendAttrs(resource.Attributes())
 	appendAttrs(attrs)
 	return otAttrs
 }
@@ -156,12 +146,9 @@ func pdataLinksToOTLinks(links pdata.SpanLinkSlice) []apitrace.Link {
 	otLinks := make([]apitrace.Link, 0, size)
 	for i := 0; i < size; i++ {
 		link := links.At(i)
-		if link.IsNil() {
-			continue
-		}
 		sc := apitrace.SpanContext{}
-		copy(sc.TraceID[:], link.TraceID())
-		copy(sc.SpanID[:], link.SpanID())
+		sc.TraceID = link.TraceID().Bytes()
+		sc.SpanID = link.SpanID().Bytes()
 		otLinks = append(otLinks, apitrace.Link{
 			SpanContext: sc,
 			Attributes:  pdataAttributesToOTAttributes(link.Attributes(), pdata.NewResource()),
@@ -175,9 +162,6 @@ func pdataEventsToOTMessageEvents(events pdata.SpanEventSlice) []export.Event {
 	otEvents := make([]export.Event, 0, size)
 	for i := 0; i < size; i++ {
 		event := events.At(i)
-		if event.IsNil() {
-			continue
-		}
 		otEvents = append(otEvents, export.Event{
 			Name:       event.Name(),
 			Attributes: pdataAttributesToOTAttributes(event.Attributes(), pdata.NewResource()),

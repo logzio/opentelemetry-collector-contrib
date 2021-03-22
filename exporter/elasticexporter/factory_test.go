@@ -37,7 +37,7 @@ func TestCreateExporter(t *testing.T) {
 	eCfg := cfg.(*Config)
 	eCfg.APMServerURL = "http://testing.invalid"
 
-	te, err := factory.CreateTraceExporter(
+	te, err := factory.CreateTracesExporter(
 		context.Background(),
 		component.ExporterCreateParams{Logger: zap.NewNop()},
 		eCfg,
@@ -50,7 +50,6 @@ func TestCreateExporter(t *testing.T) {
 		component.ExporterCreateParams{Logger: zap.NewNop()},
 		eCfg,
 	)
-	assert.Error(t, err)
-	assert.EqualError(t, err, "telemetry type is not supported")
-	assert.Nil(t, me)
+	assert.NoError(t, err)
+	assert.NotNil(t, me, "failed to create metrics exporter")
 }

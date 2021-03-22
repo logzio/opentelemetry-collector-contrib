@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/configcheck"
+	"go.opentelemetry.io/collector/consumer/consumertest"
 	"go.uber.org/zap"
 )
 
@@ -33,26 +34,40 @@ func TestCreateDefaultConfig(t *testing.T) {
 
 func TestCreateProcessor(t *testing.T) {
 	factory := NewFactory()
+
+	realClient := kubeClientProvider
 	kubeClientProvider = newFakeClient
+
 	cfg := factory.CreateDefaultConfig()
 	params := component.ProcessorCreateParams{Logger: zap.NewNop()}
 
-	tp, err := factory.CreateTraceProcessor(context.Background(), params, nil, cfg)
+	tp, err := factory.CreateTracesProcessor(context.Background(), params, cfg, consumertest.NewTracesNop())
 	assert.NotNil(t, tp)
 	assert.NoError(t, err)
 
-	mp, err := factory.CreateMetricsProcessor(context.Background(), params, nil, cfg)
+	mp, err := factory.CreateMetricsProcessor(context.Background(), params, cfg, consumertest.NewMetricsNop())
 	assert.NotNil(t, mp)
+	assert.NoError(t, err)
+
+	lp, err := factory.CreateLogsProcessor(context.Background(), params, cfg, consumertest.NewLogsNop())
+	assert.NotNil(t, lp)
 	assert.NoError(t, err)
 
 	oCfg := cfg.(*Config)
 	oCfg.Passthrough = true
 
-	tp, err = factory.CreateTraceProcessor(context.Background(), params, nil, cfg)
+	tp, err = factory.CreateTracesProcessor(context.Background(), params, cfg, consumertest.NewTracesNop())
 	assert.NotNil(t, tp)
 	assert.NoError(t, err)
 
-	mp, err = factory.CreateMetricsProcessor(context.Background(), params, nil, cfg)
+	mp, err = factory.CreateMetricsProcessor(context.Background(), params, cfg, consumertest.NewMetricsNop())
 	assert.NotNil(t, mp)
 	assert.NoError(t, err)
+
+	lp, err = factory.CreateLogsProcessor(context.Background(), params, cfg, consumertest.NewLogsNop())
+	assert.NotNil(t, lp)
+	assert.NoError(t, err)
+
+	// Switch it back so other tests run afterwards will not fail on unexpected state
+	kubeClientProvider = realClient
 }

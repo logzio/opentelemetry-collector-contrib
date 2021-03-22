@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/consumer/consumerdata"
+	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/testbed/testbed"
 	"go.uber.org/zap"
 
@@ -29,44 +29,41 @@ import (
 
 // CarbonDataSender implements MetricDataSender for Carbon metrics protocol.
 type CarbonDataSender struct {
-	exporter component.MetricsExporterOld
-	port     int
+	testbed.DataSenderBase
+	consumer.MetricsConsumer
 }
 
 // Ensure CarbonDataSender implements MetricDataSenderOld.
-var _ testbed.MetricDataSenderOld = (*CarbonDataSender)(nil)
+var _ testbed.MetricDataSender = (*CarbonDataSender)(nil)
 
 // NewCarbonDataSender creates a new Carbon metric protocol sender that will send
 // to the specified port after Start is called.
 func NewCarbonDataSender(port int) *CarbonDataSender {
-	return &CarbonDataSender{port: port}
+	return &CarbonDataSender{
+		DataSenderBase: testbed.DataSenderBase{
+			Port: port,
+			Host: testbed.DefaultHost,
+		},
+	}
 }
 
 // Start the sender.
 func (cs *CarbonDataSender) Start() error {
 	cfg := &carbonexporter.Config{
-		Endpoint: fmt.Sprintf("localhost:%d", cs.port),
+		Endpoint: cs.GetEndpoint(),
 		Timeout:  5 * time.Second,
 	}
 
-	factory := carbonexporter.Factory{}
-	exporter, err := factory.CreateMetricsExporter(zap.L(), cfg)
+	factory := carbonexporter.NewFactory()
+	params := component.ExporterCreateParams{Logger: zap.L()}
+	exporter, err := factory.CreateMetricsExporter(context.Background(), params, cfg)
 
 	if err != nil {
 		return err
 	}
 
-	cs.exporter = exporter
+	cs.MetricsConsumer = exporter
 	return nil
-}
-
-// SendMetrics sends metrics. Can be called after Start.
-func (cs *CarbonDataSender) SendMetrics(metrics consumerdata.MetricsData) error {
-	return cs.exporter.ConsumeMetricsData(context.Background(), metrics)
-}
-
-// Flush previously sent metrics.
-func (cs *CarbonDataSender) Flush() {
 }
 
 // GenConfigYAMLStr returns receiver config for the agent.
@@ -74,12 +71,7 @@ func (cs *CarbonDataSender) GenConfigYAMLStr() string {
 	// Note that this generates a receiver config for agent.
 	return fmt.Sprintf(`
   carbon:
-    endpoint: localhost:%d`, cs.port)
-}
-
-// GetCollectorPort returns receiver port for the Collector.
-func (cs *CarbonDataSender) GetCollectorPort() int {
-	return cs.port
+    endpoint: %s`, cs.GetEndpoint())
 }
 
 // ProtocolName returns protocol name as it is specified in Collector config.

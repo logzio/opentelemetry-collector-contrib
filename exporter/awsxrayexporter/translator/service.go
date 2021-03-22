@@ -17,29 +17,20 @@ package translator
 import (
 	"go.opentelemetry.io/collector/consumer/pdata"
 	semconventions "go.opentelemetry.io/collector/translator/conventions"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/awsxray"
 )
 
-// ServiceData provides the shape for unmarshalling service version.
-type ServiceData struct {
-	Version         string `json:"version,omitempty"`
-	CompilerVersion string `json:"compiler_version,omitempty"`
-	Compiler        string `json:"compiler,omitempty"`
-}
+func makeService(resource pdata.Resource) *awsxray.ServiceData {
+	var service *awsxray.ServiceData
 
-func makeService(resource pdata.Resource) *ServiceData {
-	var (
-		service *ServiceData
-	)
-	if resource.IsNil() {
-		return service
-	}
 	verStr, ok := resource.Attributes().Get(semconventions.AttributeServiceVersion)
 	if !ok {
 		verStr, ok = resource.Attributes().Get(semconventions.AttributeContainerTag)
 	}
 	if ok {
-		service = &ServiceData{
-			Version: verStr.StringVal(),
+		service = &awsxray.ServiceData{
+			Version: awsxray.String(verStr.StringVal()),
 		}
 	}
 	return service

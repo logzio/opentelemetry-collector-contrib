@@ -22,7 +22,6 @@ import (
 	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/config/configmodels"
 	"go.opentelemetry.io/collector/consumer"
-	"go.uber.org/zap"
 )
 
 // runner starts and stops receiver instances.
@@ -35,10 +34,9 @@ type runner interface {
 
 // receiverRunner handles starting/stopping of a concrete subreceiver instance.
 type receiverRunner struct {
-	logger       *zap.Logger
-	nextConsumer consumer.MetricsConsumerOld
+	params       component.ReceiverCreateParams
+	nextConsumer consumer.MetricsConsumer
 	idNamespace  string
-	ctx          context.Context
 	host         component.Host
 }
 
@@ -52,7 +50,7 @@ func (run *receiverRunner) start(receiver receiverConfig, discoveredConfig userC
 		return nil, fmt.Errorf("unable to lookup factory for receiver %q", receiver.typeStr)
 	}
 
-	receiverFactory := factory.(component.ReceiverFactoryOld)
+	receiverFactory := factory.(component.ReceiverFactory)
 
 	cfg, err := run.loadRuntimeReceiverConfig(receiverFactory, receiver, discoveredConfig)
 	if err != nil {
@@ -63,7 +61,7 @@ func (run *receiverRunner) start(receiver receiverConfig, discoveredConfig userC
 		return nil, err
 	}
 
-	if err := recvr.Start(run.ctx, run.host); err != nil {
+	if err := recvr.Start(context.Background(), run.host); err != nil {
 		return nil, fmt.Errorf("failed starting receiver %s: %v", cfg.Name(), err)
 	}
 
@@ -72,13 +70,13 @@ func (run *receiverRunner) start(receiver receiverConfig, discoveredConfig userC
 
 // shutdown the given receiver.
 func (run *receiverRunner) shutdown(rcvr component.Receiver) error {
-	return rcvr.Shutdown(run.ctx)
+	return rcvr.Shutdown(context.Background())
 }
 
 // loadRuntimeReceiverConfig loads the given receiverTemplate merged with config values
 // that may have been discovered at runtime.
 func (run *receiverRunner) loadRuntimeReceiverConfig(
-	factory component.ReceiverFactoryOld,
+	factory component.ReceiverFactory,
 	receiver receiverConfig,
 	discoveredConfig userConfigMap,
 ) (configmodels.Receiver, error) {
@@ -94,7 +92,7 @@ func (run *receiverRunner) loadRuntimeReceiverConfig(
 		return nil, fmt.Errorf("failed to merge template config from discovered runtime values: %v", err)
 	}
 
-	receiverConfig, err := config.LoadReceiver(mergedConfig, configmodels.Type(receiver.typeStr), receiver.fullName, factory)
+	receiverConfig, err := config.LoadReceiver(mergedConfig, receiver.typeStr, receiver.fullName, factory)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load template config: %v", err)
 	}
@@ -105,6 +103,6 @@ func (run *receiverRunner) loadRuntimeReceiverConfig(
 }
 
 // createRuntimeReceiver creates a receiver that is discovered at runtime.
-func (run *receiverRunner) createRuntimeReceiver(factory component.ReceiverFactoryOld, cfg configmodels.Receiver) (component.MetricsReceiver, error) {
-	return factory.CreateMetricsReceiver(context.Background(), run.logger, cfg, run.nextConsumer)
+func (run *receiverRunner) createRuntimeReceiver(factory component.ReceiverFactory, cfg configmodels.Receiver) (component.MetricsReceiver, error) {
+	return factory.CreateMetricsReceiver(context.Background(), run.params, cfg, run.nextConsumer)
 }

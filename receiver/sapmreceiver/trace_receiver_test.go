@@ -28,7 +28,6 @@ import (
 	"time"
 
 	"github.com/jaegertracing/jaeger/model"
-	otlptrace "github.com/open-telemetry/opentelemetry-proto/gen/go/trace/v1"
 	splunksapm "github.com/signalfx/sapm-proto/gen"
 	"github.com/signalfx/sapm-proto/sapmprotocol"
 	"github.com/stretchr/testify/assert"
@@ -38,26 +37,25 @@ import (
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/config/configtls"
+	"go.opentelemetry.io/collector/consumer/consumertest"
 	"go.opentelemetry.io/collector/consumer/pdata"
-	"go.opentelemetry.io/collector/exporter/exportertest"
 	"go.opentelemetry.io/collector/testutil"
 	"go.opentelemetry.io/collector/translator/conventions"
 	tracetranslator "go.opentelemetry.io/collector/translator/trace"
 	"go.uber.org/zap"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/common/splunk"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/splunk"
 )
 
 func expectedTraceData(t1, t2, t3 time.Time) pdata.Traces {
-	traceID := pdata.TraceID(
-		[]byte{0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF, 0x80})
-	parentSpanID := pdata.SpanID([]byte{0x1F, 0x1E, 0x1D, 0x1C, 0x1B, 0x1A, 0x19, 0x18})
-	childSpanID := pdata.SpanID([]byte{0xAF, 0xAE, 0xAD, 0xAC, 0xAB, 0xAA, 0xA9, 0xA8})
+	traceID := pdata.NewTraceID(
+		[16]byte{0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF, 0x80})
+	parentSpanID := pdata.NewSpanID([8]byte{0x1F, 0x1E, 0x1D, 0x1C, 0x1B, 0x1A, 0x19, 0x18})
+	childSpanID := pdata.NewSpanID([8]byte{0xAF, 0xAE, 0xAD, 0xAC, 0xAB, 0xAA, 0xA9, 0xA8})
 
 	traces := pdata.NewTraces()
 	traces.ResourceSpans().Resize(1)
 	rs := traces.ResourceSpans().At(0)
-	rs.Resource().InitEmpty()
 	rs.Resource().Attributes().InsertString(conventions.AttributeServiceName, "issaTest")
 	rs.Resource().Attributes().InsertBool("bool", true)
 	rs.Resource().Attributes().InsertString("string", "yes")
@@ -72,8 +70,9 @@ func expectedTraceData(t1, t2, t3 time.Time) pdata.Traces {
 	span0.SetName("DBSearch")
 	span0.SetStartTime(pdata.TimestampUnixNano(uint64(t1.UnixNano())))
 	span0.SetEndTime(pdata.TimestampUnixNano(uint64(t2.UnixNano())))
-	span0.Status().InitEmpty()
-	span0.Status().SetCode(pdata.StatusCode(otlptrace.Status_NotFound))
+	// Set invalid status code that is not with the valid list of value.
+	// This will be set from incoming invalid code.
+	span0.Status().SetCode(trace.StatusCodeNotFound)
 	span0.Status().SetMessage("Stale indices")
 
 	span1 := rs.InstrumentationLibrarySpans().At(0).Spans().At(1)
@@ -82,14 +81,15 @@ func expectedTraceData(t1, t2, t3 time.Time) pdata.Traces {
 	span1.SetName("ProxyFetch")
 	span1.SetStartTime(pdata.TimestampUnixNano(uint64(t2.UnixNano())))
 	span1.SetEndTime(pdata.TimestampUnixNano(uint64(t3.UnixNano())))
-	span1.Status().InitEmpty()
-	span1.Status().SetCode(pdata.StatusCode(otlptrace.Status_InternalError))
+	// Set invalid status code that is not with the valid list of value.
+	// This will be set from incoming invalid code.
+	span1.Status().SetCode(trace.StatusCodeInternal)
 	span1.Status().SetMessage("Frontend crash")
 
 	return traces
 }
 
-func grpcFixture(t1 time.Time, d1, d2 time.Duration) *model.Batch {
+func grpcFixture(t1 time.Time) *model.Batch {
 	traceID := model.TraceID{}
 	traceID.Unmarshal([]byte{0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF, 0x80})
 	parentSpanID := model.NewSpanID(binary.BigEndian.Uint64([]byte{0x1F, 0x1E, 0x1D, 0x1C, 0x1B, 0x1A, 0x19, 0x18}))
@@ -110,7 +110,7 @@ func grpcFixture(t1 time.Time, d1, d2 time.Duration) *model.Batch {
 				SpanID:        childSpanID,
 				OperationName: "DBSearch",
 				StartTime:     t1,
-				Duration:      d1,
+				Duration:      10 * time.Minute,
 				Tags: []model.KeyValue{
 					model.String(tracetranslator.TagStatusMsg, "Stale indices"),
 					model.Int64(tracetranslator.TagStatusCode, trace.StatusCodeNotFound),
@@ -128,8 +128,8 @@ func grpcFixture(t1 time.Time, d1, d2 time.Duration) *model.Batch {
 				TraceID:       traceID,
 				SpanID:        parentSpanID,
 				OperationName: "ProxyFetch",
-				StartTime:     t1.Add(d1),
-				Duration:      d2,
+				StartTime:     t1.Add(10 * time.Minute),
+				Duration:      2 * time.Second,
 				Tags: []model.KeyValue{
 					model.String(tracetranslator.TagStatusMsg, "Frontend crash"),
 					model.Int64(tracetranslator.TagStatusCode, trace.StatusCodeInternal),
@@ -212,7 +212,7 @@ func sendSapm(endpoint string, sapm *splunksapm.PostSpansRequest, zipped bool, t
 	return resp, nil
 }
 
-func setupReceiver(t *testing.T, config *Config, sink *exportertest.SinkTraceExporter) component.TraceReceiver {
+func setupReceiver(t *testing.T, config *Config, sink *consumertest.TracesSink) component.TracesReceiver {
 	params := component.ReceiverCreateParams{Logger: zap.NewNop()}
 	sr, err := New(context.Background(), params, config, sink)
 	assert.NoError(t, err, "should not have failed to create the SAPM receiver")
@@ -257,7 +257,7 @@ func TestReception(t *testing.T) {
 						Endpoint: defaultEndpoint,
 					},
 				},
-				sapm:   &splunksapm.PostSpansRequest{Batches: []*model.Batch{grpcFixture(now, time.Minute*10, time.Second*2)}},
+				sapm:   &splunksapm.PostSpansRequest{Batches: []*model.Batch{grpcFixture(now)}},
 				zipped: false,
 				useTLS: false,
 			},
@@ -271,7 +271,7 @@ func TestReception(t *testing.T) {
 						Endpoint: defaultEndpoint,
 					},
 				},
-				sapm:   &splunksapm.PostSpansRequest{Batches: []*model.Batch{grpcFixture(now, time.Minute*10, time.Second*2)}},
+				sapm:   &splunksapm.PostSpansRequest{Batches: []*model.Batch{grpcFixture(now)}},
 				zipped: true,
 				useTLS: false,
 			},
@@ -291,7 +291,7 @@ func TestReception(t *testing.T) {
 						},
 					},
 				},
-				sapm:   &splunksapm.PostSpansRequest{Batches: []*model.Batch{grpcFixture(now, time.Minute*10, time.Second*2)}},
+				sapm:   &splunksapm.PostSpansRequest{Batches: []*model.Batch{grpcFixture(now)}},
 				zipped: false,
 				useTLS: true,
 			},
@@ -301,7 +301,7 @@ func TestReception(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 
-			sink := new(exportertest.SinkTraceExporter)
+			sink := new(consumertest.TracesSink)
 			sr := setupReceiver(t, tt.args.config, sink)
 			defer sr.Shutdown(context.Background())
 
@@ -362,10 +362,10 @@ func TestAccessTokenPassthrough(t *testing.T) {
 			}
 
 			sapm := &splunksapm.PostSpansRequest{
-				Batches: []*model.Batch{grpcFixture(time.Now().UTC(), time.Minute*10, time.Second*2)},
+				Batches: []*model.Batch{grpcFixture(time.Now().UTC())},
 			}
 
-			sink := new(exportertest.SinkTraceExporter)
+			sink := new(consumertest.TracesSink)
 			sr := setupReceiver(t, config, sink)
 			defer sr.Shutdown(context.Background())
 

@@ -15,12 +15,13 @@
 package jaegerthrifthttpexporter
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config/configerror"
 	"go.opentelemetry.io/collector/config/configmodels"
+	"go.opentelemetry.io/collector/exporter/exporterhelper"
 	"go.uber.org/zap"
 )
 
@@ -29,17 +30,15 @@ const (
 	typeStr = "jaeger_thrift"
 )
 
-// Factory is the factory for Jaeger Thrift over HTTP exporter.
-type Factory struct {
+// NewFactory creates a factory for Jaeger Thrift over HTTP exporter.
+func NewFactory() component.ExporterFactory {
+	return exporterhelper.NewFactory(
+		typeStr,
+		createDefaultConfig,
+		exporterhelper.WithTraces(createTraceExporter))
 }
 
-// Type gets the type of the Exporter config created by this factory.
-func (f *Factory) Type() configmodels.Type {
-	return configmodels.Type(typeStr)
-}
-
-// CreateDefaultConfig creates the default configuration for exporter.
-func (f *Factory) CreateDefaultConfig() configmodels.Exporter {
+func createDefaultConfig() configmodels.Exporter {
 	return &Config{
 		ExporterSettings: configmodels.ExporterSettings{
 			TypeVal: configmodels.Type(typeStr),
@@ -49,11 +48,11 @@ func (f *Factory) CreateDefaultConfig() configmodels.Exporter {
 	}
 }
 
-// CreateTraceExporter creates a trace exporter based on this config.
-func (f *Factory) CreateTraceExporter(
-	logger *zap.Logger,
+func createTraceExporter(
+	_ context.Context,
+	_ component.ExporterCreateParams,
 	config configmodels.Exporter,
-) (component.TraceExporterOld, error) {
+) (component.TracesExporter, error) {
 
 	expCfg := config.(*Config)
 	_, err := url.ParseRequestURI(expCfg.URL)
@@ -73,13 +72,5 @@ func (f *Factory) CreateTraceExporter(
 		return nil, err
 	}
 
-	return New(config, expCfg.URL, expCfg.Headers, expCfg.Timeout)
-}
-
-// CreateMetricsExporter creates a metrics exporter based on this config.
-func (f *Factory) CreateMetricsExporter(
-	logger *zap.Logger,
-	cfg configmodels.Exporter,
-) (component.MetricsExporterOld, error) {
-	return nil, configerror.ErrDataTypeIsNotSupported
+	return newTraceExporter(config, component.ExporterCreateParams{Logger: zap.NewNop()}, expCfg.URL, expCfg.Headers, expCfg.Timeout)
 }

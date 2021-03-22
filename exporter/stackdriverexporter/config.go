@@ -15,20 +15,46 @@
 package stackdriverexporter
 
 import (
+	"time"
+
 	"go.opentelemetry.io/collector/config/configmodels"
+	"go.opentelemetry.io/collector/exporter/exporterhelper"
+	"google.golang.org/api/option"
 )
 
 // Config defines configuration for Stackdriver exporter.
 type Config struct {
 	configmodels.ExporterSettings `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct.
 	ProjectID                     string                   `mapstructure:"project"`
-	Prefix                        string                   `mapstructure:"metric_prefix"`
+	UserAgent                     string                   `mapstructure:"user_agent"`
 	Endpoint                      string                   `mapstructure:"endpoint"`
-	NumOfWorkers                  int                      `mapstructure:"number_of_workers"`
-	SkipCreateMetricDescriptor    bool                     `mapstructure:"skip_create_metric_descriptor"`
 	// Only has effect if Endpoint is not ""
-	UseInsecure      bool              `mapstructure:"use_insecure"`
-	ResourceMappings []ResourceMapping `mapstructure:"resource_mappings"`
+	UseInsecure bool `mapstructure:"use_insecure"`
+	// Timeout for all API calls. If not set, defaults to 12 seconds.
+	exporterhelper.TimeoutSettings `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct.
+	ResourceMappings               []ResourceMapping        `mapstructure:"resource_mappings"`
+	// GetClientOptions returns additional options to be passed
+	// to the underlying Google Cloud API client.
+	// Must be set programmatically (no support via declarative config).
+	// Optional.
+	GetClientOptions func() []option.ClientOption
+
+	TraceConfig  TraceConfig  `mapstructure:"trace"`
+	MetricConfig MetricConfig `mapstructure:"metric"`
+	NumOfWorkers int          `mapstructure:"number_of_workers"`
+}
+
+type TraceConfig struct {
+	BundleDelayThreshold time.Duration `mapstructure:"bundle_delay_threshold"`
+	BundleCountThreshold int           `mapstructure:"bundle_count_threshold"`
+	BundleByteThreshold  int           `mapstructure:"bundle_byte_threshold"`
+	BundleByteLimit      int           `mapstructure:"bundle_byte_limit"`
+	BufferMaxBytes       int           `mapstructure:"buffer_max_bytes"`
+}
+
+type MetricConfig struct {
+	Prefix                     string `mapstructure:"prefix"`
+	SkipCreateMetricDescriptor bool   `mapstructure:"skip_create_descriptor"`
 }
 
 // ResourceMapping defines mapping of resources from source (OpenCensus) to target (Stackdriver).

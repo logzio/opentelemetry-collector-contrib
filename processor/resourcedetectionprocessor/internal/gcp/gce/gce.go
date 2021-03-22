@@ -19,27 +19,30 @@ package gce // import "cloud.google.com/go/compute/metadata"
 import (
 	"context"
 
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenterror"
 	"go.opentelemetry.io/collector/consumer/pdata"
 	"go.opentelemetry.io/collector/translator/conventions"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourcedetectionprocessor/internal"
 )
 
 const (
-	TypeStr          = "gce"
-	cloudProviderGCP = "gcp"
+	TypeStr = "gce"
 )
+
+var _ internal.Detector = (*Detector)(nil)
 
 type Detector struct {
 	metadata gceMetadata
 }
 
-func NewDetector() *Detector {
-	return &Detector{metadata: &gceMetadataImpl{}}
+func NewDetector(component.ProcessorCreateParams, internal.DetectorConfig) (internal.Detector, error) {
+	return &Detector{metadata: &gceMetadataImpl{}}, nil
 }
 
 func (d *Detector) Detect(context.Context) (pdata.Resource, error) {
 	res := pdata.NewResource()
-	res.InitEmpty()
 
 	if !d.metadata.OnGCE() {
 		return res, nil
@@ -54,7 +57,7 @@ func (d *Detector) Detect(context.Context) (pdata.Resource, error) {
 }
 
 func (d *Detector) initializeCloudAttributes(attr pdata.AttributeMap) []error {
-	attr.InsertString(conventions.AttributeCloudProvider, cloudProviderGCP)
+	attr.InsertString(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderGCP)
 
 	var errors []error
 
@@ -82,7 +85,7 @@ func (d *Detector) initializeHostAttributes(attr pdata.AttributeMap) []error {
 	if err != nil {
 		errors = append(errors, err)
 	} else {
-		attr.InsertString(conventions.AttributeHostHostname, hostname)
+		attr.InsertString(conventions.AttributeHostName, hostname)
 	}
 
 	instanceID, err := d.metadata.InstanceID()
@@ -90,13 +93,6 @@ func (d *Detector) initializeHostAttributes(attr pdata.AttributeMap) []error {
 		errors = append(errors, err)
 	} else {
 		attr.InsertString(conventions.AttributeHostID, instanceID)
-	}
-
-	name, err := d.metadata.InstanceName()
-	if err != nil {
-		errors = append(errors, err)
-	} else {
-		attr.InsertString(conventions.AttributeHostName, name)
 	}
 
 	hostType, err := d.metadata.Get("instance/machine-type")

@@ -55,11 +55,11 @@ const (
 )
 
 var (
-	defaultTraceID                = []byte{35, 191, 77, 229, 162, 242, 217, 75, 148, 170, 81, 99, 227, 163, 145, 25}
+	defaultTraceID                = [16]byte{35, 191, 77, 229, 162, 242, 217, 75, 148, 170, 81, 99, 227, 163, 145, 25}
 	defaultTraceIDAsHex           = fmt.Sprintf("%02x", defaultTraceID)
-	defaultSpanID                 = []byte{35, 191, 77, 229, 162, 242, 217, 75, 148, 170, 81, 99, 227, 163, 145, 26}
+	defaultSpanID                 = [8]byte{35, 191, 77, 229, 162, 242, 217, 76}
 	defaultSpanIDAsHex            = fmt.Sprintf("%02x", defaultSpanID)
-	defaultParentSpanID           = []byte{35, 191, 77, 229, 162, 242, 217, 75, 148, 170, 81, 99, 227, 163, 145, 27}
+	defaultParentSpanID           = [8]byte{35, 191, 77, 229, 162, 242, 217, 77}
 	defaultParentSpanIDAsHex      = fmt.Sprintf("%02x", defaultParentSpanID)
 	defaultSpanStartTime          = pdata.TimestampUnixNano(0)
 	defaultSpanEndTme             = pdata.TimestampUnixNano(60000000000)
@@ -82,8 +82,8 @@ var (
 	}
 
 	requiredDatabaseAttributes = map[string]pdata.AttributeValue{
-		attributeDBSystem: pdata.NewAttributeValueString(defaultDBSystem),
-		attributeDBName:   pdata.NewAttributeValueString(defaultDBName),
+		conventions.AttributeDBSystem: pdata.NewAttributeValueString(defaultDBSystem),
+		conventions.AttributeDBName:   pdata.NewAttributeValueString(defaultDBName),
 	}
 
 	requiredMessagingAttributes = map[string]pdata.AttributeValue{
@@ -108,14 +108,14 @@ var (
 // http.scheme, http.host, http.target => data.Url
 // Also sets a few other things to increase code coverage:
 // - a specific SpanStatus as opposed to none
-// - an error  http.status_code
+// - an error http.status_code
 // - http.route is specified which should replace Span name as part of the RequestData name
 // - no  http.client_ip or net.peer.ip specified which causes data.Source to be empty
 // - adds a few different types of attributes
 func TestHTTPServerSpanToRequestDataAttributeSet1(t *testing.T) {
 	span := getDefaultHTTPServerSpan()
-	span.Status().InitEmpty()
-	span.Status().SetCode(0)
+	span.Status().SetCode(pdata.StatusCodeError)
+	span.Status().SetMessage("Fubar")
 	spanAttributes := span.Attributes()
 
 	set := map[string]pdata.AttributeValue{
@@ -149,6 +149,7 @@ func TestHTTPServerSpanToRequestDataAttributeSet1(t *testing.T) {
 	assert.Equal(t, "", data.Source)
 	assert.Equal(t, "GET /bizzle", data.Name)
 	assert.Equal(t, "https://foo/bar?biz=baz", data.Url)
+	assert.Equal(t, span.Status().Message(), data.Properties[attributeOtelStatusDescription])
 }
 
 // Tests proper assignment for a HTTP server span
@@ -405,6 +406,34 @@ func TestRPCClientSpanToRemoteDependencyData(t *testing.T) {
 	envelope, _ = spanToEnvelope(defaultResource, defaultInstrumentationLibrary, span, zap.NewNop())
 	data = envelope.Data.(*contracts.Data).BaseData.(*contracts.RemoteDependencyData)
 	defaultRPCRemoteDependencyDataValidations(t, span, data, "127.0.0.1:81")
+
+	// test RPC error using the new rpc.grpc.status_code attribute
+	span.Status().SetCode(pdata.StatusCodeError)
+	span.Status().SetMessage("Resource exhausted")
+	spanAttributes.InsertInt(attributeRPCGRPCStatusCode, 8)
+
+	envelope, _ = spanToEnvelope(defaultResource, defaultInstrumentationLibrary, span, zap.NewNop())
+	data = envelope.Data.(*contracts.Data).BaseData.(*contracts.RemoteDependencyData)
+
+	assert.Equal(t, "8", data.ResultCode)
+	assert.Equal(t, span.Status().Code().String(), data.Properties[attributeOtelStatusCode])
+	assert.Equal(t, pdata.DeprecatedStatusCodeUnknownError.String(), data.Properties[attributeOtelStatusDeprecatedCode])
+	assert.Equal(t, span.Status().Message(), data.Properties[attributeOtelStatusDescription])
+
+	// test RPC error using the legacy Deprecated status code
+	span.Status().SetCode(pdata.StatusCodeUnset)
+	spanAttributes.Delete(attributeRPCGRPCStatusCode)
+
+	span.Status().SetDeprecatedCode(8)
+	span.Status().SetMessage("Resource exhausted")
+
+	envelope, _ = spanToEnvelope(defaultResource, defaultInstrumentationLibrary, span, zap.NewNop())
+	data = envelope.Data.(*contracts.Data).BaseData.(*contracts.RemoteDependencyData)
+
+	assert.Equal(t, "8", data.ResultCode)
+	assert.Equal(t, pdata.StatusCodeUnset.String(), data.Properties[attributeOtelStatusCode])
+	assert.Equal(t, pdata.DeprecatedStatusCodeResourceExhausted.String(), data.Properties[attributeOtelStatusDeprecatedCode])
+	assert.Equal(t, span.Status().Message(), data.Properties[attributeOtelStatusDescription])
 }
 
 // Tests proper assignment for a Database client span
@@ -433,7 +462,7 @@ func TestDatabaseClientSpanToRemoteDependencyData(t *testing.T) {
 		spanAttributes,
 		map[string]pdata.AttributeValue{
 			conventions.AttributeDBStatement: pdata.NewAttributeValueString(""),
-			attributeDBOperation:             pdata.NewAttributeValueString(defaultDBOperation),
+			conventions.AttributeDBOperation: pdata.NewAttributeValueString(defaultDBOperation),
 		})
 
 	envelope, _ = spanToEnvelope(defaultResource, defaultInstrumentationLibrary, span, zap.NewNop())
@@ -517,6 +546,17 @@ func TestUnknownInternalSpanToRemoteDependencyData(t *testing.T) {
 		map[string]pdata.AttributeValue{
 			"foo": pdata.NewAttributeValueString("bar"),
 		})
+
+	envelope, _ := spanToEnvelope(defaultResource, defaultInstrumentationLibrary, span, zap.NewNop())
+	commonEnvelopeValidations(t, span, envelope, defaultRemoteDependencyDataEnvelopeName)
+	data := envelope.Data.(*contracts.Data).BaseData.(*contracts.RemoteDependencyData)
+	defaultInternalRemoteDependencyDataValidations(t, span, data)
+}
+
+// Tests that spans with unspecified kind are treated similar to internal spans
+func TestUnspecifiedSpanToInProcRemoteDependencyData(t *testing.T) {
+	span := getDefaultInternalSpan()
+	span.SetKind(pdata.SpanKindUNSPECIFIED)
 
 	envelope, _ := spanToEnvelope(defaultResource, defaultInstrumentationLibrary, span, zap.NewNop())
 	commonEnvelopeValidations(t, span, envelope, defaultRemoteDependencyDataEnvelopeName)
@@ -726,7 +766,7 @@ func assertAttributesCopiedToPropertiesOrMeasurements(
 			case pdata.AttributeValueDOUBLE:
 				m, exists := measurements[k]
 				assert.True(t, exists)
-				assert.Equal(t, float64(v.DoubleVal()), m)
+				assert.Equal(t, v.DoubleVal(), m)
 			}
 		})
 }
@@ -736,10 +776,9 @@ func assertAttributesCopiedToPropertiesOrMeasurements(
 */
 func getSpan(spanName string, spanKind pdata.SpanKind, initialAttributes map[string]pdata.AttributeValue) pdata.Span {
 	span := pdata.NewSpan()
-	span.InitEmpty()
-	span.SetTraceID(defaultTraceID)
-	span.SetSpanID(defaultSpanID)
-	span.SetParentSpanID(defaultParentSpanID)
+	span.SetTraceID(pdata.NewTraceID(defaultTraceID))
+	span.SetSpanID(pdata.NewSpanID(defaultSpanID))
+	span.SetParentSpanID(pdata.NewSpanID(defaultParentSpanID))
 	span.SetName(spanName)
 	span.SetKind(spanKind)
 	span.SetStartTime(defaultSpanStartTime)
@@ -824,7 +863,6 @@ func getDefaultInternalSpan() pdata.Span {
 // Returns a default Resource
 func getResource() pdata.Resource {
 	r := pdata.NewResource()
-	r.InitEmpty()
 	r.Attributes().InitFromMap(map[string]pdata.AttributeValue{
 		conventions.AttributeServiceName:      pdata.NewAttributeValueString(defaultServiceName),
 		conventions.AttributeServiceNamespace: pdata.NewAttributeValueString(defaultServiceNamespace),
@@ -837,7 +875,6 @@ func getResource() pdata.Resource {
 // Returns a default instrumentation library
 func getInstrumentationLibrary() pdata.InstrumentationLibrary {
 	il := pdata.NewInstrumentationLibrary()
-	il.InitEmpty()
 	il.SetName(defaultInstrumentationLibraryName)
 	il.SetVersion(defaultInstrumentationLibraryVersion)
 	return il

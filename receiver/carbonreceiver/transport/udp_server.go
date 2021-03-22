@@ -25,6 +25,7 @@ import (
 	metricspb "github.com/census-instrumentation/opencensus-proto/gen-go/metrics/v1"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/consumer/consumerdata"
+	"go.opentelemetry.io/collector/translator/internaldata"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/carbonreceiver/protocol"
 )
@@ -52,7 +53,7 @@ func NewUDPServer(addr string) (Server, error) {
 
 func (u *udpServer) ListenAndServe(
 	parser protocol.Parser,
-	nextConsumer consumer.MetricsConsumerOld,
+	nextConsumer consumer.MetricsConsumer,
 	reporter Reporter,
 ) error {
 	if parser == nil || nextConsumer == nil || reporter == nil {
@@ -96,11 +97,11 @@ func (u *udpServer) Close() error {
 
 func (u *udpServer) handlePacket(
 	p protocol.Parser,
-	nextConsumer consumer.MetricsConsumerOld,
+	nextConsumer consumer.MetricsConsumer,
 	data []byte,
 ) {
 	ctx := u.reporter.OnDataReceived(context.Background())
-	var numReceivedTimeseries, numInvalidTimeseries int
+	var numReceivedMetricPoints int
 	var metrics []*metricspb.Metric
 	buf := bytes.NewBuffer(data)
 	for {
@@ -113,10 +114,9 @@ func (u *udpServer) handlePacket(
 		}
 		line := strings.TrimSpace(string(bytes))
 		if line != "" {
-			numReceivedTimeseries++
+			numReceivedMetricPoints++
 			metric, err := p.Parse(line)
 			if err != nil {
-				numInvalidTimeseries++
 				u.reporter.OnTranslationError(ctx, err)
 				continue
 			}
@@ -128,6 +128,6 @@ func (u *udpServer) handlePacket(
 	md := consumerdata.MetricsData{
 		Metrics: metrics,
 	}
-	err := nextConsumer.ConsumeMetricsData(ctx, md)
-	u.reporter.OnMetricsProcessed(ctx, numReceivedTimeseries, numInvalidTimeseries, err)
+	err := nextConsumer.ConsumeMetrics(ctx, internaldata.OCToMetrics(md))
+	u.reporter.OnMetricsProcessed(ctx, numReceivedMetricPoints, err)
 }

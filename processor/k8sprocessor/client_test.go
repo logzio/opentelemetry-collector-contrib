@@ -18,11 +18,10 @@ import (
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/common/k8sconfig"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/k8sconfig"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/k8sprocessor/kube"
 )
 
@@ -42,10 +41,7 @@ func selectors() (labels.Selector, fields.Selector) {
 
 // newFakeClient instantiates a new FakeClient object and satisfies the ClientProvider type
 func newFakeClient(_ *zap.Logger, apiCfg k8sconfig.APIConfig, rules kube.ExtractionRules, filters kube.Filters, _ kube.APIClientsetProvider, _ kube.InformerProvider) (kube.Client, error) {
-	cs, err := newFakeAPIClientset(apiCfg)
-	if err != nil {
-		return nil, err
-	}
+	cs := fake.NewSimpleClientset()
 
 	ls, fs := selectors()
 	return &fakeClient{
@@ -73,8 +69,4 @@ func (f *fakeClient) Start() {
 // Stop is a noop for FakeClient.
 func (f *fakeClient) Stop() {
 	close(f.StopCh)
-}
-
-func newFakeAPIClientset(_ k8sconfig.APIConfig) (kubernetes.Interface, error) {
-	return fake.NewSimpleClientset(), nil
 }

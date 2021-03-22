@@ -16,6 +16,7 @@ package collection
 
 import (
 	"reflect"
+	"time"
 
 	"go.opentelemetry.io/collector/consumer/consumerdata"
 	"go.uber.org/zap"
@@ -27,6 +28,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/common/metrics"
 )
 
 // TODO: Consider moving some of these constants to
@@ -59,7 +62,6 @@ const (
 	k8sKindJob                   = "Job"
 	k8sKindReplicationController = "ReplicationController"
 	k8sKindReplicaSet            = "ReplicaSet"
-	k8sKindService               = "Service"
 	k8sStatefulSet               = "StatefulSet"
 )
 
@@ -111,8 +113,8 @@ func (dc *DataCollector) UpdateMetricsStore(obj interface{}, rm []*resourceMetri
 	}
 }
 
-func (dc *DataCollector) CollectMetricData() []consumerdata.MetricsData {
-	return dc.metricsStore.getMetricData()
+func (dc *DataCollector) CollectMetricData(currentTime time.Time) []consumerdata.MetricsData {
+	return dc.metricsStore.getMetricData(currentTime)
 }
 
 // SyncMetrics updates the metric store with latest metrics from the kubernetes object.
@@ -156,11 +158,11 @@ func (dc *DataCollector) SyncMetrics(obj interface{}) {
 }
 
 // SyncMetadata updates the metric store with latest metrics from the kubernetes object
-func (dc *DataCollector) SyncMetadata(obj interface{}) map[ResourceID]*KubernetesMetadata {
-	km := map[ResourceID]*KubernetesMetadata{}
+func (dc *DataCollector) SyncMetadata(obj interface{}) map[metrics.ResourceID]*KubernetesMetadata {
+	km := map[metrics.ResourceID]*KubernetesMetadata{}
 	switch o := obj.(type) {
 	case *corev1.Pod:
-		km = getMetadataForPod(o, dc.metadataStore)
+		km = getMetadataForPod(o, dc.metadataStore, dc.logger)
 	case *corev1.Node:
 		km = getMetadataForNode(o)
 	case *corev1.ReplicationController:

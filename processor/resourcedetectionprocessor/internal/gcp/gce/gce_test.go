@@ -22,7 +22,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/translator/conventions"
+	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourcedetectionprocessor/internal"
 )
@@ -65,6 +67,12 @@ func (m *mockMetadata) Get(suffix string) (string, error) {
 	return args.String(0), args.Error(1)
 }
 
+func TestNewDetector(t *testing.T) {
+	d, err := NewDetector(component.ProcessorCreateParams{Logger: zap.NewNop()}, nil)
+	assert.NotNil(t, d)
+	assert.NoError(t, err)
+}
+
 func TestDetectTrue(t *testing.T) {
 	md := &mockMetadata{}
 	md.On("OnGCE").Return(true)
@@ -81,14 +89,13 @@ func TestDetectTrue(t *testing.T) {
 	require.NoError(t, err)
 
 	expected := internal.NewResource(map[string]interface{}{
-		conventions.AttributeCloudProvider: cloudProviderGCP,
+		conventions.AttributeCloudProvider: conventions.AttributeCloudProviderGCP,
 		conventions.AttributeCloudAccount:  "1",
 		conventions.AttributeCloudZone:     "zone",
 
-		conventions.AttributeHostHostname: "hostname",
-		conventions.AttributeHostID:       "2",
-		conventions.AttributeHostName:     "name",
-		conventions.AttributeHostType:     "machine-type",
+		conventions.AttributeHostID:   "2",
+		conventions.AttributeHostName: "hostname",
+		conventions.AttributeHostType: "machine-type",
 	})
 
 	res.Attributes().Sort()
@@ -120,9 +127,9 @@ func TestDetectError(t *testing.T) {
 	detector := &Detector{metadata: md}
 	res, err := detector.Detect(context.Background())
 
-	assert.EqualError(t, err, "[err1; err2; err3; err4; err5; err6]")
+	assert.EqualError(t, err, "[err1; err2; err3; err4; err6]")
 
-	expected := internal.NewResource(map[string]interface{}{conventions.AttributeCloudProvider: cloudProviderGCP})
+	expected := internal.NewResource(map[string]interface{}{conventions.AttributeCloudProvider: conventions.AttributeCloudProviderGCP})
 
 	res.Attributes().Sort()
 	expected.Attributes().Sort()

@@ -23,12 +23,9 @@ import (
 )
 
 func MetricsData(
-	logger *zap.Logger,
-	summary *stats.Summary,
-	metadata Metadata,
-	typeStr string,
-	metricGroupsToCollect map[MetricGroup]bool,
-) []*consumerdata.MetricsData {
+	logger *zap.Logger, summary *stats.Summary,
+	metadata Metadata, typeStr string,
+	metricGroupsToCollect map[MetricGroup]bool) []consumerdata.MetricsData {
 	acc := &metricDataAccumulator{
 		metadata:              metadata,
 		logger:                logger,
@@ -43,6 +40,10 @@ func MetricsData(
 		acc.podStats(podResource, podStats)
 		for _, containerStats := range podStats.Containers {
 			acc.containerStats(podResource, containerStats)
+		}
+
+		for _, volumeStats := range podStats.VolumeStats {
+			acc.volumeStats(podResource, volumeStats)
 		}
 	}
 	for _, md := range acc.m {
